@@ -1,7 +1,22 @@
+# databases
+*.db
+
+# compiled python
 __pycache__/
 *.pyc
 *.pyo
-*.db
+*.pyd
+
+# trained models
+*.pkl
+
+# environment
 .env
+*.env
+
+# OS
 .DS_Store
-classifier.pkl
+
+# IDE
+.vscode/
+.idea/
