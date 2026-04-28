@@ -1,0 +1,6 @@
+langchain-openai
+langgraph
+sqlalchemy
+cryptography
+fastapi
+uvicorn
