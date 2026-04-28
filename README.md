@@ -35,8 +35,8 @@ flowchart TD
 ## Detection Pipeline
 
 1. **Stage 1 - Regex**: Immediate block on known patterns (SQL injection, prompt injection, privilege escalation). Patterns are loaded from policies.yaml.
-2. **Stage 2 - TF-IDF Classifier**: A logistic regression classifier trained on labeled examples. If confidence exceeds 90%, the verdict is final and the LLM is not called. Only uncertain inputs are escalated.
-3. **Stage 3 - LLM**: A local Gemma 3 model via LM Studio performs semantic intent analysis using few-shot prompting. Only reached when Stage 2 is uncertain.
+2. **Stage 2 - TF-IDF Classifier**: A logistic regression classifier trained on 70 labeled examples. If confidence exceeds 90%, the verdict is final and the LLM is not called. Only uncertain inputs are escalated.
+3. **Stage 3 - LLM**: A local Gemma 3 model via LM Studio performs semantic intent analysis using few-shot prompting. Only reached when Stage 2 is uncertain. If the LLM is unavailable, the system fails closed (blocks by default).
 
 ## Policy DSL
 
@@ -52,8 +52,8 @@ Agents, permissions, and detection patterns are fully defined in policies.yaml -
 
     detection:
       patterns:
-        - "(?i)\bDROP\s+TABLE\b"
-        - "(?i)ignore\s+(all\s+)?previous\s+instructions"
+        - "(?i)\\bDROP\\s+TABLE\\b"
+        - "(?i)ignore\\s+(all\\s+)?previous\\s+instructions"
 
 ## Kill Switch
 
@@ -67,15 +67,21 @@ The validator detects illegal delegation attempts - scenarios where an agent wit
 - Tool reference bypass (mentioning a restricted tool name in a message)
 - Identity impersonation (pretend you are, as if you were)
 
+## Environment Variables
+
+    export ASF_MASTER_KEY=<base64_key>         # AES-256-GCM master key for private key encryption
+    export ASF_DASHBOARD_USER=<username>        # Audit dashboard username (default: admin)
+    export ASF_DASHBOARD_PASSWORD=<password>    # Audit dashboard password (default: asf-secret-2024)
+
+ASF_MASTER_KEY is generated automatically on first run if not set. Copy the printed value and export it to persist keys across restarts.
+
 ## Setup
 
 Install dependencies:
 
     pip install -r requirements.txt
 
-Set the master key environment variable (generated automatically on first run if not set):
-
-    export ASF_MASTER_KEY=<your_base64_key>
+Set environment variables (see above).
 
 Start LM Studio locally with the Gemma 3 4B model on port 1234.
 
@@ -87,7 +93,7 @@ Start the audit dashboard (separate terminal):
 
     python server.py
 
-Open http://localhost:8000/audit in your browser (credentials: admin / asf-secret-2024).
+Open http://localhost:8000/audit in your browser.
 
 ## Demo Scenarios
 
