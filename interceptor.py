@@ -44,8 +44,8 @@ def _stage1_regex(tool_input: str):
     policies = _load_policies()
     for pattern in policies["detection"]["patterns"]:
         if re.search(pattern, tool_input):
-            return True, pattern
-    return False, None
+            return "ALLOW", pattern
+    return "DENY", None
 
 def _stage2_classifier(tool_input: str):
     proba = _classifier.predict_proba([tool_input])[0]
@@ -86,33 +86,32 @@ def security_interceptor(agent_id, tool_name, tool_input):
     allowed_tools = registry.get_agent_permissions(agent_id)
     if not allowed_tools:
         AUDITOR.log_event(agent_id, tool_name, "BLOCKED", "Agent suspended")
-        return False, "ACCESS DENIED: Agent is suspended."
+        return "DENY", "ACCESS DENIED: Agent is suspended."
 
     if tool_name not in allowed_tools:
         AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Tool '{tool_name}' not in permissions: {allowed_tools}")
-        return False, f"ACCESS DENIED: '{tool_name}' not authorized for {agent_id}."
+        return "DENY", f"ACCESS DENIED: '{tool_name}' not authorized for {agent_id}."
 
     is_dangerous, matched_pattern = _stage1_regex(tool_input)
     if is_dangerous:
         registry.suspend_agent(agent_id)
         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", f"Regex match: {matched_pattern}")
-        return False, "KILL SWITCH ACTIVATED (pattern detected)."
+        return "DENY", "KILL SWITCH ACTIVATED (pattern detected)."
 
     verdict, confidence = _stage2_classifier(tool_input)
     print(f"[STAGE 2] Verdict: {verdict} (confidence: {confidence:.2f})")
     if verdict == "DANGEROUS":
         registry.suspend_agent(agent_id)
         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", f"Classifier verdict: DANGEROUS (confidence: {confidence:.2f})")
-        return False, f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
+        return "DENY", f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
     if verdict == "SAFE":
         AUDITOR.log_event(agent_id, tool_name, "ALLOWED", f"Classifier verdict: SAFE (confidence: {confidence:.2f})")
-        return True, f"Authorized (classifier confidence: {confidence:.2f})."
+        return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
 
     print(f"[STAGE 3] Classifier uncertain ({confidence:.2f}), escalating to LLM.")
     if _stage3_llm(tool_input):
-        registry.suspend_agent(agent_id)
-        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Semantic attack detected")
-        return False, "KILL SWITCH ACTIVATED (semantic analysis)."
+        AUDITOR.log_event(agent_id, tool_name, "HITL_REQUESTED", "Semantic attack flagged by Stage 3")
+        return "HITL", "Action paused for HUMAN APPROVAL (Flagged by Stage 3 LLM)."
 
     AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Safe input")
-    return True, "Authorized."
+    return "ALLOW", "Authorized."
