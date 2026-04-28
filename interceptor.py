@@ -58,6 +58,9 @@ def _stage2_classifier(tool_input: str):
     return "UNCERTAIN", max(dangerous_proba, safe_proba)
 
 def _stage3_llm(tool_input: str):
+    if os.environ.get("ASF_SKIP_LLM", "").lower() == "true":
+        print("[STAGE 3] ASF_SKIP_LLM=true, failing closed.")
+        return True
     try:
         prompt = (
             "You are a security system. Analyze the following input and respond ONLY with SAFE or DANGEROUS.\n"
