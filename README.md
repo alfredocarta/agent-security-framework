@@ -17,23 +17,24 @@ Every tool call is signed by the originating agent, verified cryptographically,
 checked against a permission registry, and evaluated through a 3-stage detection
 pipeline before execution is allowed.
 
-    flowchart TD
-        A([Agent Node]) -->|signed request| B([Security Node])
-        B --> C{Signature valid?}
-        C -->|no| D[BLOCK: invalid identity]
-        C -->|yes| E{Permission check}
-        E -->|tool not allowed| F[BLOCK: unauthorized tool]
-        E -->|allowed| G{Stage 1 - Regex}
-        G -->|pattern matched| H[KILL SWITCH]
-        G -->|clean| I{Stage 2 - TF-IDF Classifier}
-        I -->|DANGEROUS| H
-        I -->|SAFE| J([Execution Node])
-        I -->|UNCERTAIN| K{Stage 3 - LLM}
-        K -->|DANGEROUS| H
-        K -->|SAFE| J
-        H --> L[(DB: agent suspended)]
-        J --> M[Tool executed]
-
+```mermaid
+flowchart TD
+    A([Agent Node]) -->|signed request| B([Security Node])
+    B --> C{Signature valid?}
+    C -->|no| D[BLOCK: invalid identity]
+    C -->|yes| E{Permission check}
+    E -->|tool not allowed| F[BLOCK: unauthorized tool]
+    E -->|allowed| G{Stage 1 - Regex}
+    G -->|pattern matched| H[KILL SWITCH]
+    G -->|clean| I{Stage 2 - TF-IDF Classifier}
+    I -->|DANGEROUS| H
+    I -->|SAFE| J([Execution Node])
+    I -->|UNCERTAIN| K{Stage 3 - LLM}
+    K -->|DANGEROUS| H
+    K -->|SAFE| J
+    H --> L[(DB: agent suspended)]
+    J --> M[Tool executed]
+```
 ## Core Modules
 
 - key_authority.py - Cryptographic identity management. Each agent has a persistent
