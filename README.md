@@ -8,43 +8,60 @@
 ## How it works
 
 ```
-                        +-------------------+
-                        |   LangGraph Agent |
-                        +--------+----------+
-                                 |
-                          tool call request
-                                 |
-                        +--------v----------+
-                        |    Interceptor    |  <-- entry point for every tool call
-                        +--------+----------+
-                                 |
-              +------------------+------------------+
-              |                                     |
-   +----------v-----------+             +-----------v----------+
-   | Stage 1 - Regex      |  BLOCK -->  |     DENY / LOG       |
-   | Kill-switch patterns |             +----------------------+
-   +----------+-----------+
-              | PASS
-   +----------v-----------+
-   | Stage 2 - ML         |  BLOCK -->  |     DENY / LOG       |
-   | TF-IDF + RandomForest|             +----------------------+
-   +----------+-----------+
-              | UNCERTAIN --> HITL pause (LangGraph MemorySaver)
-              | PASS
-   +----------v-----------+
-   | Stage 3 - Semantic   |  BLOCK -->  |     DENY / LOG       |
-   | Local LLM (Gemma 3)  |             +----------------------+
-   +----------+-----------+
-              | PASS
-   +----------v-----------+
-   |  Sandbox Executor    |  isolated Docker container, no network
-   +----------+-----------+
-              |
-         tool output
-              |
-   +----------v-----------+
-   |   PostgreSQL Audit   |  persistent log of every decision
-   +----------------------+
+      +----------------+       +-----------------+
+      | Agent Registry |       |  Key Authority  |
+      | (PostgreSQL)   |       | (Crypto Signing)|
+      +-------+--------+       +--------+--------+
+              |                         |
+              +-----------+-------------+
+                          |
+                 +--------v----------+
+                 |  LangGraph Agent  |  <-- Signs the request
+                 +--------+----------+
+                          |
+               signed tool call request
+                          |
+                 +--------v----------+          +-------------------+
+                 | Message Validator | <------- |   Policy Engine   |
+                 | (Check Signature) |          |  (policies.yaml)  |
+                 +--------+----------+          +-------------------+
+                          | 
+                          +-- INVALID SIGNATURE --> REJECT / DROP
+                          | 
+                       VALID
+                          |
+                 +--------v----------+ 
+                 |    Interceptor    | <-- entry point for security stages
+                 +--------+----------+ 
+                          |                     
+               +----------+------------------+
+               |                             |
+    +----------v-----------+      +----------v-----------+
+    | Stage 1 - Regex      |BLOCK |      DENY / LOG      |
+    | Kill-switch patterns |----> +----------------------+
+    +----------+-----------+
+               | PASS
+    +----------v-----------+      +----------------------+
+    | Stage 2 - ML         |BLOCK |      DENY / LOG      |
+    | TF-IDF + RandomForest|----> +----------------------+
+    +----------+-----------+
+               | UNCERTAIN --> HITL pause (LangGraph MemorySaver)
+               | PASS
+    +----------v-----------+      +----------------------+
+    | Stage 3 - Semantic   |BLOCK |      DENY / LOG      |
+    | Local LLM (Gemma 3)  |----> +----------------------+
+    +----------+-----------+
+               | PASS
+    +----------v-----------+
+    |  Sandbox Executor    |  isolated Docker container, no network
+    +----------+-----------+
+               |
+          tool output
+               |
+    +----------v-----------+
+    |   PostgreSQL Audit   |  persistent log of every decision
+    +----------------------+
+
 ```
 
 ---
