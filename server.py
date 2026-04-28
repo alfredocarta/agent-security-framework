@@ -1,5 +1,5 @@
 import secrets
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 from registry import SessionLocal, AuditModel
@@ -10,6 +10,7 @@ security = HTTPBasic()
 
 DASHBOARD_USER = "admin"
 DASHBOARD_PASSWORD = "asf-secret-2024"
+PAGE_SIZE = 20
 
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     correct_user = secrets.compare_digest(credentials.username, DASHBOARD_USER)
@@ -23,9 +24,23 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 @app.get("/audit", response_class=HTMLResponse)
-def get_dashboard(username: str = Depends(verify_credentials)):
+def get_dashboard(
+    username: str = Depends(verify_credentials),
+    page: int = Query(default=1, ge=1)
+):
     db = SessionLocal()
-    logs = db.query(AuditModel).order_by(AuditModel.timestamp.desc()).all()
+    total = db.query(AuditModel).count()
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(page, total_pages)
+    offset = (page - 1) * PAGE_SIZE
+
+    logs = (
+        db.query(AuditModel)
+        .order_by(AuditModel.timestamp.desc())
+        .offset(offset)
+        .limit(PAGE_SIZE)
+        .all()
+    )
     db.close()
 
     rows = ""
@@ -47,6 +62,23 @@ def get_dashboard(username: str = Depends(verify_credentials)):
         </tr>
         """
 
+    prev_disabled = "disabled" if page <= 1 else ""
+    next_disabled = "disabled" if page >= total_pages else ""
+
+    pagination = f"""
+    <div style="margin-top:20px; display:flex; align-items:center; gap:12px;">
+        <a href="/audit?page={page - 1}"
+           style="padding:8px 16px; background:#333; color:white; text-decoration:none; border-radius:4px; pointer-events: {"none" if page <= 1 else "auto"}; opacity: {"0.4" if page <= 1 else "1"};">
+            Previous
+        </a>
+        <span>Page {page} of {total_pages} ({total} total events)</span>
+        <a href="/audit?page={page + 1}"
+           style="padding:8px 16px; background:#333; color:white; text-decoration:none; border-radius:4px; pointer-events: {"none" if page >= total_pages else "auto"}; opacity: {"0.4" if page >= total_pages else "1"};">
+            Next
+        </a>
+    </div>
+    """
+
     return f"""
     <html>
         <head><title>Security Audit Dashboard</title></head>
@@ -63,6 +95,7 @@ def get_dashboard(username: str = Depends(verify_credentials)):
                 </tr>
                 {rows}
             </table>
+            {pagination}
         </body>
     </html>
     """
