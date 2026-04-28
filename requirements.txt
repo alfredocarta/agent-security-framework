@@ -4,3 +4,4 @@ sqlalchemy
 cryptography
 fastapi
 uvicorn
+pyyaml

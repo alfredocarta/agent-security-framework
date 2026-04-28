@@ -1,0 +1,32 @@
+agents:
+  triage_agent:
+    risk_level: medium
+    permissions:
+      - communication
+  billing_agent:
+    risk_level: high
+    permissions:
+      - read_db
+      - write_db
+      - issue_refund
+  analytics_agent:
+    risk_level: low
+    permissions:
+      - read_db
+      - communication
+      - read_docs
+
+detection:
+  patterns:
+    - "(?i)\\bDROP\\s+TABLE\\b"
+    - "(?i)\\bDELETE\\s+FROM\\b"
+    - "(?i)\\bTRUNCATE\\s+TABLE\\b"
+    - "(?i)\\bDROP\\s+DATABASE\\b"
+    - "(?i)\\bSHUTDOWN\\b"
+    - "(?i)(;|\\s)--"
+    - "(?i)\\bOR\\s+1\\s*=\\s*1\\b"
+    - "(?i)\\bUNION\\s+SELECT\\b"
+    - "(?i)forget\\s+(all\\s+)?(your\\s+)?(instructions|rules|policy)"
+    - "(?i)ignore\\s+(all\\s+)?previous\\s+instructions"
+    - "(?i)root\\s+access"
+    - "(?i)bypass\\s+(security|policy|rules)"

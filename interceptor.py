@@ -1,7 +1,16 @@
 import re
+import yaml
+import os
 from langchain_openai import ChatOpenAI
 import registry
 from audit import AUDITOR
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
+
+def _load_policies():
+    with open(POLICIES_PATH, "r") as f:
+        return yaml.safe_load(f)
 
 security_llm = ChatOpenAI(
     base_url="http://localhost:1234/v1",
@@ -10,23 +19,9 @@ security_llm = ChatOpenAI(
     temperature=0
 )
 
-DANGEROUS_PATTERNS = [
-    r"(?i)\bDROP\s+TABLE\b",
-    r"(?i)\bDELETE\s+FROM\b",
-    r"(?i)\bTRUNCATE\s+TABLE\b",
-    r"(?i)\bDROP\s+DATABASE\b",
-    r"(?i)\bSHUTDOWN\b",
-    r"(?i)(;|\s)--",
-    r"(?i)\bOR\s+1\s*=\s*1\b",
-    r"(?i)\bUNION\s+SELECT\b",
-    r"(?i)forget\s+(all\s+)?(your\s+)?(instructions|rules|policy)",
-    r"(?i)ignore\s+(all\s+)?previous\s+instructions",
-    r"(?i)root\s+access",
-    r"(?i)bypass\s+(security|policy|rules)",
-]
-
 def _stage1_regex(tool_input: str):
-    for pattern in DANGEROUS_PATTERNS:
+    policies = _load_policies()
+    for pattern in policies["detection"]["patterns"]:
         if re.search(pattern, tool_input):
             return True, pattern
     return False, None
