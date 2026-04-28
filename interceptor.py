@@ -14,13 +14,18 @@ def _load_policies():
     with open(POLICIES_PATH, "r") as f:
         return yaml.safe_load(f)
 
-security_llm = ChatOpenAI(
-    base_url="http://localhost:1234/v1",
-    api_key="lm-studio",
-    model_name="google/gemma-3-4b",
-    temperature=0,
-    request_timeout=10
-)
+def _build_llm():
+    policies = _load_policies()
+    cfg = policies.get("llm", {})
+    return ChatOpenAI(
+        base_url=cfg.get("base_url", "http://localhost:1234/v1"),
+        api_key=cfg.get("api_key", "lm-studio"),
+        model_name=cfg.get("model", "google/gemma-3-4b"),
+        temperature=0,
+        request_timeout=cfg.get("timeout", 10)
+    )
+
+security_llm = _build_llm()
 
 
 def _load_classifier():
