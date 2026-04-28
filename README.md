@@ -4,6 +4,22 @@ A Zero Trust security middleware for multi-agent LangGraph architectures. The sy
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    A([Agent Node]) -->|signed request| B([Security Node])
+    B --> C{Signature valid?}
+    C -->|no| D[BLOCK: invalid identity]
+    C -->|yes| E{Permission check}
+    E -->|tool not allowed| F[BLOCK: unauthorized tool]
+    E -->|allowed| G{Stage 1 - Regex}
+    G -->|pattern matched| H[KILL SWITCH]
+    G -->|clean| I{Stage 3 - LLM}
+    I -->|DANGEROUS| H
+    I -->|SAFE| J([Execution Node])
+    H --> K[(DB: agent suspended)]
+    J --> L[Tool executed]
+```
+
 The framework is composed of 5 core modules:
 
 - **Key Authority** - Manages cryptographic identity. Each agent has a persistent Ed25519 key pair. Every request is signed by the agent and verified by the system before processing.
