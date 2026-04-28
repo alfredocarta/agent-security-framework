@@ -22,7 +22,6 @@ security_llm = ChatOpenAI(
     request_timeout=10
 )
 
-from training_data import TRAINING_DATA
 
 def _load_classifier():
     if not os.path.exists(CLASSIFIER_PATH):
