@@ -1,29 +1,31 @@
-services:
-  asf:
-    build: .
-    container_name: agent-security-framework
-    ports:
-      - "8000:8000"
-    environment:
-      - ASF_MASTER_KEY=${ASF_MASTER_KEY}
-      - ASF_DASHBOARD_USER=${ASF_DASHBOARD_USER:-admin}
-      - ASF_DASHBOARD_PASSWORD=${ASF_DASHBOARD_PASSWORD:-asf-secret-2024}
-    volumes:
-      - asf_data:/app/data
-    command: python demo.py
+version: '3.8'
 
-  dashboard:
-    build: .
-    container_name: asf-dashboard
-    ports:
-      - "8000:8000"
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: asf_postgres
     environment:
-      - ASF_MASTER_KEY=${ASF_MASTER_KEY}
-      - ASF_DASHBOARD_USER=${ASF_DASHBOARD_USER:-admin}
-      - ASF_DASHBOARD_PASSWORD=${ASF_DASHBOARD_PASSWORD:-asf-secret-2024}
-    command: python server.py
+      POSTGRES_USER: asf_user
+      POSTGRES_PASSWORD: asf_secure_password
+      POSTGRES_DB: asf_registry
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U asf_user -d asf_registry"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://asf_user:asf_secure_password@db:5432/asf_registry
+      - ASF_SKIP_LLM=${ASF_SKIP_LLM:-false}
     depends_on:
-      - asf
+      db:
+        condition: service_healthy
 
 volumes:
-  asf_data:
+  postgres_data:
