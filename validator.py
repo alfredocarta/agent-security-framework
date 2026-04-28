@@ -1,6 +1,6 @@
 from key_authority import KA
 from registry import get_agent_permissions
-from interceptor import _stage1_regex, _stage3_llm, _load_policies
+from interceptor import _stage1_regex, _stage2_classifier, _stage3_llm, _load_policies
 from audit import AUDITOR
 import re
 
@@ -62,9 +62,21 @@ def validate_inter_agent_message(sender_id, receiver_id, message, signature):
         AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Regex match: {matched_pattern}")
         return False, f"MESSAGE BLOCKED: dangerous pattern detected ({matched_pattern})."
 
+
+    verdict, confidence = _stage2_classifier(message)
+    if verdict == "DANGEROUS":
+        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Classifier verdict: DANGEROUS (confidence: {confidence:.2f})")
+        return False, f"MESSAGE BLOCKED: classifier flagged as dangerous (confidence: {confidence:.2f})."
+    if verdict == "SAFE":
+        AUDITOR.log_event(sender_id, "inter_agent_message", "ALLOWED", f"Safe message to {receiver_id}")
+        return True, "Message validated and safe."
+
     if _stage3_llm(message):
         AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", "Semantic threat in inter-agent message")
         return False, "MESSAGE BLOCKED: semantic analysis flagged this message as dangerous."
+
+
+
 
     AUDITOR.log_event(sender_id, "inter_agent_message", "ALLOWED", f"Safe message to {receiver_id}")
     return True, "Message validated and safe."
