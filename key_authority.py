@@ -11,7 +11,7 @@ import os
 import base64
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-KEY_DB_URL = f"sqlite:///{os.path.join(BASE_DIR, chr(39)keys_registry.db{chr(39)})}"
+KEY_DB_URL = f"sqlite:///{os.path.join(BASE_DIR, 'keys_registry.db')}"
 
 key_engine = create_engine(KEY_DB_URL)
 KeySession = sessionmaker(autocommit=False, autoflush=False, bind=key_engine)
@@ -23,8 +23,8 @@ def _get_master_key() -> bytes:
         return base64.b64decode(raw)
     key = AESGCM.generate_key(bit_length=256)
     encoded = base64.b64encode(key).decode()
-    print(f"[KEY AUTHORITY] WARNING: ASF_MASTER_KEY not set. Generated a temporary key.")
-    print(f"[KEY AUTHORITY] Set this environment variable to persist across restarts:")
+    print("[KEY AUTHORITY] WARNING: ASF_MASTER_KEY not set. Generated a temporary key.")
+    print("[KEY AUTHORITY] Set this environment variable to persist across restarts:")
     print(f"  export ASF_MASTER_KEY={encoded}")
     return key
 
@@ -61,7 +61,7 @@ class KeyAuthority:
     def register_agent(self, agent_id):
         status = self._get_agent_status(agent_id)
         if status == "suspended":
-            raise PermissionError(f"REGISTRATION DENIED: agent {agent_idrm agents_registry.db audit_log.json} is suspended and cannot re-register.")
+            raise PermissionError(f"REGISTRATION DENIED: agent '{agent_id}' is suspended and cannot re-register.")
 
         db = KeySession()
         existing = db.query(KeyModel).filter(KeyModel.agent_id == agent_id).first()
@@ -91,7 +91,7 @@ class KeyAuthority:
         record = db.query(KeyModel).filter(KeyModel.agent_id == agent_id).first()
         db.close()
         if not record:
-            raise ValueError(f"Agent {agent_idrm agents_registry.db audit_log.json} not registered in KeyAuthority.")
+            raise ValueError(f"Agent '{agent_id}' not registered in KeyAuthority.")
         private_key_pem = _decrypt(record.private_key_enc)
         private_key = load_pem_private_key(private_key_pem, password=None)
         return private_key.sign(message.encode())

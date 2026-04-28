@@ -31,13 +31,12 @@ def _check_delegation(sender_id, message):
     restricted_tools = all_tools - set(sender_permissions)
     for tool in restricted_tools:
         if re.search(rf"(?i)\b{re.escape(tool)}\b", message):
-            return True, f"message references restricted tool {toolrm agents_registry.db audit_log.json}"
+            return True, f"message references restricted tool '{tool}'"
 
     return False, None
 
 def validate_inter_agent_message(sender_id, receiver_id, message, signature):
-    print(f"
-[VALIDATOR] Validating message: {sender_id} -> {receiver_id}")
+    print(f"\n[VALIDATOR] Validating message: {sender_id} -> {receiver_id}")
 
     if not KA.verify_signature(sender_id, message, signature):
         AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", "Invalid signature")
