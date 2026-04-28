@@ -1,0 +1,29 @@
+services:
+  asf:
+    build: .
+    container_name: agent-security-framework
+    ports:
+      - "8000:8000"
+    environment:
+      - ASF_MASTER_KEY=${ASF_MASTER_KEY}
+      - ASF_DASHBOARD_USER=${ASF_DASHBOARD_USER:-admin}
+      - ASF_DASHBOARD_PASSWORD=${ASF_DASHBOARD_PASSWORD:-asf-secret-2024}
+    volumes:
+      - asf_data:/app/data
+    command: python demo.py
+
+  dashboard:
+    build: .
+    container_name: asf-dashboard
+    ports:
+      - "8000:8000"
+    environment:
+      - ASF_MASTER_KEY=${ASF_MASTER_KEY}
+      - ASF_DASHBOARD_USER=${ASF_DASHBOARD_USER:-admin}
+      - ASF_DASHBOARD_PASSWORD=${ASF_DASHBOARD_PASSWORD:-asf-secret-2024}
+    command: python server.py
+    depends_on:
+      - asf
+
+volumes:
+  asf_data:
