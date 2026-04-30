@@ -94,6 +94,17 @@ Every interceptor decision - ALLOW, DENY, HITL - is persisted in PostgreSQL with
 
 ---
 
+## Compliance (EU AI Act)
+
+| Article | Requirement | Implementation |
+|---|---|---|
+| Art. 9 - Risk Management | Risk classification and lifecycle control | Agent Registry with per-agent risk level and operational state |
+| Art. 12 - Logging | Tamper-proof, reconstructable logs | Audit Trail with HMAC signing and hash chaining |
+| Art. 14 - Human Oversight | Human intervention capability | HITL via LangGraph MemorySaver + manual kill switch |
+| Art. 15 - Robustness | Resilience against adversarial inputs | Deterministic policy enforcement, 3-stage detection pipeline, fail-closed behavior |
+
+---
+
 ## Competitive landscape
 
 | Feature | AgentGuard | MS Agent Governance Toolkit | Asqav | This Framework |
