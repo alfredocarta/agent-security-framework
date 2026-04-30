@@ -1,17 +1,14 @@
-import json
 import pickle
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import cross_val_score
+from training_data import TRAINING_DATA
 
 # Load the realistic dataset
-with open("training_data.json", "r") as f:
-    data = json.load(f)
-
-texts = [item["text"] for item in data]
-labels = [item["label"] for item in data]
+texts = [item[0] for item in TRAINING_DATA]
+labels = [item[1] for item in TRAINING_DATA]
 
 # Build the ML Pipeline: TF-IDF + Random Forest
 pipeline = Pipeline([
