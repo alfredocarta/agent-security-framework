@@ -94,6 +94,21 @@ Every interceptor decision - ALLOW, DENY, HITL - is persisted in PostgreSQL with
 
 ---
 
+## Competitive landscape
+
+| Feature | AgentGuard | MS Agent Governance Toolkit | Asqav | This Framework |
+|---|---|---|---|---|
+| Agent → Tool security | Yes | Yes | Yes | Yes |
+| Inter-agent permission isolation | No | No | No | Yes |
+| Context poisoning detection | Partial | No | No | Yes |
+| Agent impersonation prevention | No | No | No | Yes |
+| Human-triggered kill switch | No | Partial | No | Yes |
+| Audit trail with hash chaining | No | Yes | No | Yes |
+
+> Competitor feature assessment based on publicly available documentation as of April 2026. Independent verification recommended.
+
+---
+
 ## Quick start
 
 ```bash
