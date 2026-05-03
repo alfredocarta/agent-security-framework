@@ -37,15 +37,16 @@ def _check_delegation(sender_id, message):
 
 def validate_inter_agent_message(sender_id, receiver_id, message, signature):
     print(f"\n[VALIDATOR] Validating message: {sender_id} -> {receiver_id}")
+    AUDITOR.log_event(sender_id, "inter_agent_message", "VALIDATOR_START", f"Validating message to {receiver_id}")
 
     if not KA.verify_signature(sender_id, message, signature):
         AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", "Invalid signature")
         return False, "CRITICAL ERROR: Invalid signature - possible impersonation attempt."
-    print("[VALIDATOR] Signature verified.")
+    AUDITOR.log_event(sender_id, "inter_agent_message", "SIGNATURE_OK", "Ed25519 signature verified")
 
     allowed_tools = get_agent_permissions(sender_id)
     if not allowed_tools:
-        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", "Agent suspended")
+        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", "Agent suspended or not found")
         return False, "ACCESS DENIED: Sender agent is suspended."
 
     if "communication" not in allowed_tools:
@@ -54,29 +55,30 @@ def validate_inter_agent_message(sender_id, receiver_id, message, signature):
 
     is_delegation, matched = _check_delegation(sender_id, message)
     if is_delegation:
-        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Delegation attack detected: {matched}")
+        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Delegation attack: {matched}")
         return False, f"DELEGATION ATTACK BLOCKED: {matched}."
 
+    AUDITOR.log_event(sender_id, "inter_agent_message", "STAGE_1_START", "Regex pattern analysis")
     is_dangerous, matched_pattern = _stage1_regex(message)
     if is_dangerous:
-        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Regex match: {matched_pattern}")
+        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Stage 1 regex match: {matched_pattern}")
         return False, f"MESSAGE BLOCKED: dangerous pattern detected ({matched_pattern})."
+    AUDITOR.log_event(sender_id, "inter_agent_message", "STAGE_1_PASS", "No dangerous pattern matched")
 
-
+    AUDITOR.log_event(sender_id, "inter_agent_message", "STAGE_2_START", "ML classifier analysis")
     verdict, confidence = _stage2_classifier(message)
     if verdict == "DANGEROUS":
-        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Classifier verdict: DANGEROUS (confidence: {confidence:.2f})")
+        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", f"Stage 2 BLOCK: DANGEROUS (confidence: {confidence:.2f})")
         return False, f"MESSAGE BLOCKED: classifier flagged as dangerous (confidence: {confidence:.2f})."
     if verdict == "SAFE":
-        AUDITOR.log_event(sender_id, "inter_agent_message", "ALLOWED", f"Safe message to {receiver_id}")
+        AUDITOR.log_event(sender_id, "inter_agent_message", "ALLOWED", f"Stage 2 PASS: SAFE (confidence: {confidence:.2f}) - delivered to {receiver_id}")
         return True, "Message validated and safe."
 
+    AUDITOR.log_event(sender_id, "inter_agent_message", "STAGE_2_UNCERTAIN", f"Classifier uncertain (confidence: {confidence:.2f}), escalating")
+    AUDITOR.log_event(sender_id, "inter_agent_message", "STAGE_3_START", "LLM semantic analysis")
     if _stage3_llm(message):
-        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", "Semantic threat in inter-agent message")
+        AUDITOR.log_event(sender_id, "inter_agent_message", "BLOCKED", "Stage 3 LLM flagged as dangerous")
         return False, "MESSAGE BLOCKED: semantic analysis flagged this message as dangerous."
 
-
-
-
-    AUDITOR.log_event(sender_id, "inter_agent_message", "ALLOWED", f"Safe message to {receiver_id}")
+    AUDITOR.log_event(sender_id, "inter_agent_message", "ALLOWED", f"Stage 3 LLM cleared - delivered to {receiver_id}")
     return True, "Message validated and safe."

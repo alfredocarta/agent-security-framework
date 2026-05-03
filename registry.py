@@ -1,13 +1,13 @@
 import os
-from sqlalchemy import create_engine, Column, String, JSON, DateTime
+import json
+import hashlib
+from sqlalchemy import create_engine, Column, String, JSON, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'agents_registry.db')}"
-
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./asf_local.db")
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{os.path.join(BASE_DIR, 'asf_local.db')}")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -28,6 +28,12 @@ class AuditModel(Base):
     outcome = Column(String)
     reason = Column(String)
     prev_hash = Column(String)
+
+class PoliciesModel(Base):
+    __tablename__ = "policies"
+    key = Column(String, primary_key=True)
+    value = Column(JSON)
+    content_hash = Column(Text)
 
 Base.metadata.create_all(bind=engine)
 
@@ -53,3 +59,20 @@ def add_or_update_agent(agent_id, risk_level, permissions):
     db.merge(agent)
     db.commit()
     db.close()
+
+def store_detection_patterns(patterns):
+    h = hashlib.sha256(json.dumps(patterns, sort_keys=True).encode()).hexdigest()
+    db = SessionLocal()
+    record = PoliciesModel(key="detection_patterns", value=patterns, content_hash=h)
+    db.merge(record)
+    db.commit()
+    db.close()
+    return h
+
+def get_detection_patterns():
+    db = SessionLocal()
+    record = db.query(PoliciesModel).filter(PoliciesModel.key == "detection_patterns").first()
+    db.close()
+    if record is None:
+        return None
+    return record.value

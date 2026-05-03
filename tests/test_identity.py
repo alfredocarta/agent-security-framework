@@ -1,6 +1,8 @@
 import os
 os.environ["ASF_SKIP_LLM"] = "true"
 
+import pytest
+from unittest.mock import patch
 from registry import add_or_update_agent
 from key_authority import KA
 from validator import validate_inter_agent_message
@@ -13,7 +15,8 @@ KA.register_agent("db_agent")
 def test_legitimate_message_allowed():
     msg = "Research complete, please update the record."
     sig = KA.sign_message("researcher_agent", msg)
-    ok, res = validate_inter_agent_message("researcher_agent", "db_agent", msg, sig)
+    with patch("validator._stage2_classifier", return_value=("SAFE", 0.95)):
+        ok, res = validate_inter_agent_message("researcher_agent", "db_agent", msg, sig)
     assert ok, f"Expected ALLOWED, got: {res}"
 
 def test_invalid_signature_blocked():

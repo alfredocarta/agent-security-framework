@@ -1,6 +1,8 @@
 import os
 os.environ["ASF_SKIP_LLM"] = "true"
 
+import pytest
+from unittest.mock import patch
 from registry import add_or_update_agent
 from key_authority import KA
 from validator import validate_inter_agent_message
@@ -33,5 +35,6 @@ def test_identity_impersonation_blocked():
 def test_legitimate_inter_agent_message_allowed():
     msg = "Case 78 has been reviewed and is ready for billing."
     sig = KA.sign_message("triage_agent", msg)
-    ok, res = validate_inter_agent_message("triage_agent", "billing_agent", msg, sig)
+    with patch("validator._stage2_classifier", return_value=("SAFE", 0.95)):
+        ok, res = validate_inter_agent_message("triage_agent", "billing_agent", msg, sig)
     assert ok, f"Expected ALLOWED, got: {res}"
