@@ -10,7 +10,7 @@
 ```
       +----------------+       +-----------------+
       | Agent Registry |       |  Key Authority  |
-      | (PostgreSQL)   |       | (Crypto Signing)|
+      |   (SQLite)     |       | (Crypto Signing)|
       +-------+--------+       +--------+--------+
               |                         |
               +-----------+-------------+
@@ -23,17 +23,17 @@
                           |
                  +--------v----------+          +-------------------+
                  | Message Validator | <------- |   Policy Engine   |
-                 | (Check Signature) |          |  (policies.yaml)  |
+                 | (Check Signature) |          |  (SQLite, hashed) |
                  +--------+----------+          +-------------------+
-                          | 
-                          +-- INVALID SIGNATURE --> REJECT / DROP
-                          | 
+                          |
+                          +-- INVALID SIGNATURE --> REJECT / LOG
+                          |
                        VALID
                           |
-                 +--------v----------+ 
+                 +--------v----------+
                  |    Interceptor    | <-- entry point for security stages
-                 +--------+----------+ 
-                          |                     
+                 +--------+----------+
+                          |
                +----------+------------------+
                |                             |
     +----------v-----------+      +----------v-----------+
@@ -45,13 +45,20 @@
     | Stage 2 - ML         |BLOCK |      DENY / LOG      |
     | TF-IDF + RandomForest|----> +----------------------+
     +----------+-----------+
-               | UNCERTAIN --> HITL pause (LangGraph MemorySaver)
-               | PASS
-    +----------v-----------+      +----------------------+
-    | Stage 3 - Semantic   |BLOCK |      DENY / LOG      |
-    | Local LLM (Gemma 3)  |----> +----------------------+
-    +----------+-----------+
-               | PASS
+               |
+               +-- dangerous_proba <= 0.25 (SAFE) ----------+
+               |                                             |
+               +-- dangerous_proba >= 0.85 --> DENY / LOG   |
+               |                                             |
+               +-- 0.25 < p < 0.85 (UNCERTAIN)              |
+               |                                             |
+    +----------v-----------+      +----------------------+  |
+    | Stage 3 - Semantic   |BLOCK |      DENY / LOG      |  |
+    | Local LLM (Gemma 3)  |----> +----------------------+  |
+    +----------+-----------+                                 |
+               | PASS                                        |
+               +<--------------------------------------------+
+               |         (SAFE bypass from Stage 2)
     +----------v-----------+
     |  Sandbox Executor    |  isolated Docker container, no network
     +----------+-----------+
@@ -59,9 +66,8 @@
           tool output
                |
     +----------v-----------+
-    |   PostgreSQL Audit   |  persistent log of every decision
+    |   SQLite Audit Trail |  persistent hash-chained log of every decision
     +----------------------+
-
 ```
 
 ---
@@ -69,28 +75,36 @@
 ## Architecture
 
 ### Stage 1 - Regex kill-switches
-Deterministic pattern matching against known bad inputs. Fast, zero-overhead, no model inference. Blocks obvious injection attempts, prompt leaks, and forbidden command patterns before anything else runs.
+Deterministic pattern matching against known bad inputs. Fast, zero-overhead, no model inference. Blocks obvious injection attempts, prompt leaks, and forbidden command patterns before anything else runs. On match: agent is immediately suspended and the event is logged.
 
 ### Stage 2 - ML classifier
-TF-IDF + Random Forest model trained on real-world jailbreaks, injection payloads, Base64/Hex obfuscations, and prompt leaking attacks. When confidence is below threshold, execution is paused and routed to a human reviewer via LangGraph MemorySaver (HITL).
+TF-IDF + Random Forest trained on real-world jailbreaks, injection payloads, Base64/Hex obfuscations, and prompt leaking attacks. Three explicit outcomes based on dangerous_proba:
+
+- >= 0.85 (DANGEROUS): block immediately, suspend agent
+- <= 0.25 (SAFE): allow directly, skip Stage 3
+- 0.25 < p < 0.85 (UNCERTAIN): escalate to Stage 3
 
 ### Stage 3 - Semantic LLM
-Local Gemma 3 instance performs zero-shot semantic validation for unknown or zero-day attack patterns that evade stages 1 and 2. Last line of automated defense before execution.
+Local Gemma 3 instance performs zero-shot semantic validation for unknown or zero-day attack patterns that evade stages 1 and 2. Only invoked when Stage 2 is uncertain. Last line of automated defense before execution. Can be bypassed via ASF_SKIP_LLM=true (fails closed).
 
 ### Sandbox executor
-Risky tools run inside ephemeral Docker containers with no network access, no shared filesystem, and strict resource limits. The container is destroyed after each execution.
+Risky tools run inside ephemeral Docker containers with no network access, no shared filesystem, strict resource limits, cap_drop=ALL, no-new-privileges, and a seccomp whitelist. The container is destroyed after each execution.
 
-### Audit log (PostgreSQL)
-Every interceptor decision - ALLOW, DENY, HITL - is persisted in PostgreSQL with timestamp, agent ID, tool name, input, and the stage that triggered the decision.
+### Audit trail (SQLite)
+Every interceptor decision is persisted in a SHA-256 hash-chained SQLite table. Each event references the hash of the previous event, making the log tamper-evident. Intermediate stage events are logged before final outcome, so a crash mid-pipeline still leaves a partial trace.
+
+### Policy engine (SQLite)
+Detection patterns are stored in a dedicated SQLite policies table with a content_hash for integrity verification. policies.yaml is used only as an import source via migrate_policies.py. At runtime, the interceptor reads exclusively from the database.
 
 ---
 
 ## Security posture
 
-- Compliant with Zero Trust principles: no tool call is trusted by default
-- Aligned with EU AI Act Art. 14 on Human Oversight
+- Zero Trust: no tool call is trusted by default
+- EU AI Act Art. 14 compliant: human oversight via HITL when classifier is uncertain
 - Defense-in-depth: three independent validation layers before execution
-- Full audit trail: every decision is logged and queryable
+- Tamper-evident audit trail: SHA-256 hash chain across all events
+- Policy integrity: detection patterns stored in DB with content hash, not in editable flat files
 
 ---
 
@@ -123,15 +137,28 @@ Every interceptor decision - ALLOW, DENY, HITL - is persisted in PostgreSQL with
 ## Quick start
 
 ```bash
-# Start the environment (PostgreSQL + services)
-docker-compose up -d --build
+# Run migration (populates DB from policies.yaml - first time only)
+python migrate_policies.py
 
 # Run the standard demo
-python3 demo.py
+python demo.py
 
 # Run the Human-in-the-Loop demo
-python3 demo_hitl.py
+python demo_hitl.py
+
+# Run the full test suite
+python -m pytest tests/ -v
 ```
+
+---
+
+## Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| ASF_MASTER_KEY | Yes | Base64-encoded AES-256 key for encrypting agent private keys |
+| ASF_SKIP_LLM | No | Set to true to skip Stage 3 LLM (fails closed) |
+| DATABASE_URL | No | SQLite connection string (default: sqlite:///./asf_local.db) |
 
 ---
 
@@ -142,11 +169,13 @@ python3 demo_hitl.py
 | Agent framework | LangGraph + LangChain |
 | Stage 1 | Regex (deterministic) |
 | Stage 2 | scikit-learn - TF-IDF + Random Forest |
-| Stage 3 | Gemma 3 (local inference) |
+| Stage 3 | Gemma 3 (local inference via LM Studio) |
 | HITL | LangGraph MemorySaver + interrupt |
-| Sandbox | Docker (ephemeral, no-network) |
-| Registry | PostgreSQL via docker-compose |
-| Audit | PostgreSQL async writes |
+| Sandbox | Docker (ephemeral, no-network, seccomp hardened) |
+| Registry | SQLite via SQLAlchemy |
+| Audit | SQLite - SHA-256 hash-chained |
+| Policy engine | SQLite with content hash verification |
+| Crypto | Ed25519 signing + AES-256-GCM key encryption |
 
 ---
 
@@ -155,16 +184,17 @@ python3 demo_hitl.py
 ```
 agent-security-framework/
 - interceptor.py        # 3-stage pipeline entry point
+- validator.py          # Inter-agent message validation (A2A)
+- audit.py              # Hash-chained audit trail writer
+- registry.py           # Agent registry + policy storage (SQLite)
+- key_authority.py      # Ed25519 identity, signing, AES-256 key encryption
+- sandbox.py            # Docker sandbox executor (seccomp hardened)
 - graph_framework.py    # LangGraph graph definition and routing
-- demo_hitl.py          # HITL demo with human approval flow
-- demo.py               # Standard end-to-end demo
+- migrate_policies.py   # One-time import of policies.yaml into DB
 - train_classifier.py   # Stage 2 model training
 - dataset_builder.py    # Training data construction and augmentation
-- audit.py              # Audit log writer
-- registry.py           # Agent registry (PostgreSQL)
-- sandbox.py            # Docker sandbox executor
-- key_authority.py      # Cryptographic identity and signing
-- validator.py          # Input schema validation
-- policies.yaml         # Security policy configuration
-- docker-compose.yml    # Full environment definition
+- demo.py               # Standard end-to-end demo
+- demo_hitl.py          # HITL demo with human approval flow
+- policies.yaml         # Import source for agents and detection patterns
+- tests/                # Full test suite (45 tests)
 ```
