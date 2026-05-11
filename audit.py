@@ -32,10 +32,10 @@ class AuditTrail:
 
                 db.add(event)
                 db.commit()
-                print(f"[AUDIT] Event stored: {new_hash[:12]}")
+                print(f"[AUDIT] Event stored: {new_hash[:12]}", file=__import__("sys").stderr)
             except Exception as e:
                 db.rollback()
-                print(f"[AUDIT] Write error: {e}")
+                print(f"[AUDIT] Write error: {e}", file=__import__("sys").stderr)
             finally:
                 db.close()
 

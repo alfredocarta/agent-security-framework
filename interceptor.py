@@ -66,7 +66,7 @@ def _stage2_classifier(tool_input: str):
 
 def _stage3_llm(tool_input: str):
     if os.environ.get("ASF_SKIP_LLM", "").lower() == "true":
-        print("[STAGE 3] ASF_SKIP_LLM=true, failing closed.")
+        print("[STAGE 3] ASF_SKIP_LLM=true, failing closed.", file=__import__("sys").stderr)
         return True
     try:
         prompt = (
@@ -84,11 +84,11 @@ def _stage3_llm(tool_input: str):
         analysis = security_llm.invoke(prompt).content.strip().upper()
         return "DANGEROUS" in analysis
     except Exception as e:
-        print(f"[STAGE 3] LLM unavailable ({e}). Failing closed.")
+        print(f"[STAGE 3] LLM unavailable ({e}). Failing closed.", file=__import__("sys").stderr)
         return True
 
 def security_interceptor(agent_id, tool_name, tool_input):
-    print(f"\n[SECURITY] Analyzing: {agent_id} -> {tool_name}")
+    print(f"\n[SECURITY] Analyzing: {agent_id} -> {tool_name}", file=__import__("sys").stderr)
     AUDITOR.log_event(agent_id, tool_name, "INTERCEPTOR_START", "Interceptor invoked")
 
     allowed_tools = registry.get_agent_permissions(agent_id)
@@ -110,7 +110,7 @@ def security_interceptor(agent_id, tool_name, tool_input):
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2_START", "ML classifier analysis")
     verdict, confidence = _stage2_classifier(tool_input)
-    print(f"[STAGE 2] Verdict: {verdict} (confidence: {confidence:.2f})")
+    print(f"[STAGE 2] Verdict: {verdict} (confidence: {confidence:.2f})", file=__import__("sys").stderr)
 
     if verdict == "DANGEROUS":
         registry.suspend_agent(agent_id)
@@ -122,7 +122,7 @@ def security_interceptor(agent_id, tool_name, tool_input):
         return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2_UNCERTAIN", f"Classifier uncertain, dangerous_proba in grey zone (confidence: {confidence:.2f})")
-    print(f"[STAGE 3] Classifier uncertain ({confidence:.2f}), escalating to LLM.")
+    print(f"[STAGE 3] Classifier uncertain ({confidence:.2f}), escalating to LLM.", file=__import__("sys").stderr)
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "LLM semantic analysis")
     if _stage3_llm(tool_input):
