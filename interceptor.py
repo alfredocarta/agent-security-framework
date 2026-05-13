@@ -131,3 +131,14 @@ def security_interceptor(agent_id, tool_name, tool_input):
 
     AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 3 LLM cleared - safe input")
     return "ALLOW", "Authorized."
+
+
+def hardened_interceptor(agent_id, tool_name, tool_input):
+    """
+    Entry point with L1.5 hardening active.
+    Applies classifier_gate, decode-and-rescan, spotlighting and canary trap
+    before invoking the Stage 1/2/3 pipeline.
+    Use this instead of security_interceptor for production deployments.
+    """
+    from hardening import apply_l1_5_hardening
+    return apply_l1_5_hardening(agent_id, tool_name, tool_input, security_interceptor)
