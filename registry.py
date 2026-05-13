@@ -76,3 +76,12 @@ def get_detection_patterns():
     if record is None:
         return None
     return record.value
+
+
+def reinstate_agent(agent_id: str) -> None:
+    """Reinstate a suspended agent to active status. Used by evaluation framework to reset state between scenarios."""
+    with SessionLocal() as session:
+        agent = session.query(AgentModel).filter(AgentModel.agent_id == agent_id).first()
+        if agent and agent.status == "suspended":
+            agent.status = "active"
+            session.commit()
