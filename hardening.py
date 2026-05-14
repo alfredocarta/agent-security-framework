@@ -219,10 +219,10 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn):
     should_block, score = classifier_gate(tool_input)
     if should_block:
         print(f"[L1.5] Classifier gate blocked (score={score:.2f})", file=sys.stderr)
-        return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})"
+        return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})", None
     if decode_and_rescan(tool_input):
         print("[L1.5] Decode-and-rescan detected encoded payload", file=sys.stderr)
-        return "DENY", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)"
+        return "DENY", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)", None
     _, spotted_input = spotlight_message(tool_input)
     print("[L1.5] Spotlighting applied", file=sys.stderr)
     instrumented_input, canary = canary_trap(spotted_input)
@@ -230,5 +230,5 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn):
     verdict, reason = interceptor_fn(agent_id, tool_name, instrumented_input)
     if canary_verify(f"{verdict} {reason}", canary):
         print(f"[L1.5] Canary trap triggered: {canary}", file=sys.stderr)
-        return "DENY", f"BLOCKED by L1.5 canary trap (canary={canary})"
-    return verdict, reason
+        return "DENY", f"BLOCKED by L1.5 canary trap (canary={canary})", canary
+    return verdict, reason, canary

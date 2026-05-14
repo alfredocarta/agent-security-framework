@@ -1,4 +1,5 @@
 import re
+import unicodedata
 import yaml
 import os
 import pickle
@@ -56,7 +57,10 @@ def _stage1_regex(tool_input: str):
     return False, None
 
 def _stage2_classifier(tool_input: str):
-    proba = _classifier.predict_proba([tool_input])[0]
+    # Unicode normalization to collapse confusables
+    normalized = unicodedata.normalize('NFKD', tool_input)
+    normalized = ''.join(c for c in normalized if not unicodedata.combining(c))
+    proba = _classifier.predict_proba([normalized])[0]
     dangerous_proba = proba[1]
     if dangerous_proba >= BLOCK_THRESHOLD:
         return "DANGEROUS", dangerous_proba
@@ -128,6 +132,12 @@ def security_interceptor(agent_id, tool_name, tool_input):
         return "DENY", f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
 
     if verdict == "SAFE":
+        if os.environ.get("ASF_ALWAYS_LLM", "").lower() == "true":
+            AUDITOR.log_event(agent_id, tool_name, "STAGE_3_DOUBLE_CHECK", "ASF_ALWAYS_LLM active")
+            if _stage3_llm(tool_input):
+                registry.suspend_agent(agent_id)
+                AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 3 double-check: dangerous")
+                return "DENY", "KILL SWITCH ACTIVATED (Stage 3 double-check)."
         AUDITOR.log_event(agent_id, tool_name, "ALLOWED", f"Stage 2 PASS: dangerous_proba <= {PASS_THRESHOLD} (confidence: {confidence:.2f})")
         return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
 
