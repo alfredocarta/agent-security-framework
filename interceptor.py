@@ -6,6 +6,7 @@ import pickle
 from langchain_openai import ChatOpenAI
 import registry
 from audit import AUDITOR
+from stage25_deberta import classify as _stage25_classify
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
@@ -142,7 +143,22 @@ def security_interceptor(agent_id, tool_name, tool_input):
         return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2_UNCERTAIN", f"Classifier uncertain, dangerous_proba in grey zone (confidence: {confidence:.2f})")
-    print(f"[STAGE 3] Classifier uncertain ({confidence:.2f}), escalating to LLM.", file=__import__("sys").stderr)
+    print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
+
+    # Stage 2.5: DeBERTa fast gate
+    AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_START", "DeBERTa fast gate")
+    stage25_verdict = _stage25_classify(tool_input)
+    print(f"[STAGE 2.5] DeBERTa verdict: {stage25_verdict}", file=__import__("sys").stderr)
+    if stage25_verdict == "DANGEROUS":
+        registry.suspend_agent(agent_id)
+        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 2.5 DeBERTa: dangerous")
+        return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)."
+    if stage25_verdict == "SAFE":
+        AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 2.5 DeBERTa: safe")
+        return "ALLOW", "Authorized (Stage 2.5 DeBERTa cleared)."
+
+    AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_UNCERTAIN", "DeBERTa uncertain, escalating to Stage 3")
+    print(f"[STAGE 2.5] DeBERTa uncertain, escalating to Stage 3 LLM.", file=__import__("sys").stderr)
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "LLM semantic analysis")
     if _stage3_llm(tool_input):

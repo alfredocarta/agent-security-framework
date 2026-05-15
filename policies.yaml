@@ -32,8 +32,8 @@ detection:
     - "(?i)bypass\\s+(security|policy|rules)"
 
 llm:
-  provider: lm_studio        # options: lm_studio, ollama, openai_compatible
-  base_url: "http://localhost:1234/v1"
-  model: "google/gemma-3-4b"
+  provider: ollama           # options: lm_studio, ollama, openai_compatible
+  base_url: "http://localhost:11434/v1"
+  model: "gemma2:2b"
   api_key: "lm-studio"
   timeout: 10
