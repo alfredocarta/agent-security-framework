@@ -25,9 +25,9 @@ def classify(tool_input: str) -> str:
     Returns "DANGEROUS", "SAFE", or "UNCERTAIN".
     Strips spotlighting ^ prefix before classification since DeBERTa
     is sensitive to those markers.
-    Disabled by default. Set ASF_ENABLE_STAGE25=true to activate.
+    Enabled by default. Set ASF_DISABLE_STAGE25=true to disable.
     """
-    if os.environ.get("ASF_ENABLE_STAGE25", "").lower() != "true":
+    if os.environ.get("ASF_DISABLE_STAGE25", "").lower() == "true":
         return "UNCERTAIN"
     if os.environ.get("ASF_SKIP_STAGE25", "").lower() == "true":
         return "UNCERTAIN"
@@ -66,7 +66,7 @@ def classify(tool_input: str) -> str:
 # Pre-load model on import (non-blocking, cached after first call)
 def _preload():
     import os
-    if os.environ.get("ASF_ENABLE_STAGE25", "").lower() != "true":
+    if os.environ.get("ASF_DISABLE_STAGE25", "").lower() == "true":
         return  # Disabled by default
     try:
         _get_model()
