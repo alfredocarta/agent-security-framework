@@ -35,8 +35,20 @@ def classify(tool_input: str) -> str:
         model = _get_model()
         if model is None:
             return "UNCERTAIN"
-        # Strip spotlight markers
+        # Strip spotlight markers and L1.5 canary references so DeBERTa
+        # sees the same clean text whether called directly or via hardened_interceptor.
         clean = re.sub(r'\^', '', tool_input)
+        clean = re.sub(r'\s*\[ref:CT-[0-9a-f]+\]\s*', ' ', clean)
+        # When tool_input is built as "scenario.message {json_args}", DeBERTa
+        # misclassifies the combined text because the imperative prefix + JSON
+        # structure triggers injection patterns even for benign content.
+        # Extract only the actual string values from JSON key-value pairs so
+        # DeBERTa classifies the semantic payload, not the structural wrapper.
+        json_values = re.findall(r'"[^"]+"\s*:\s*"([^"]*)"', clean)
+        if json_values:
+            clean = ' '.join(json_values)
+        else:
+            clean = re.sub(r'\s+', ' ', clean).strip()
         result = model(clean)
         label = result[0]['label']
         score = result[0]['score']
