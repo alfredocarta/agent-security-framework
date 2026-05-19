@@ -5,6 +5,7 @@ Sits between Stage 2 (TF-IDF) and Stage 3 (LLM).
 from __future__ import annotations
 import re
 import os
+import sys
 
 _MODEL = None
 
@@ -18,6 +19,17 @@ def _get_model():
             device=-1
         )
     return _MODEL
+
+
+def warm_up():
+    if os.environ.get("ASF_DISABLE_STAGE25", "").lower() == "true":
+        return
+    if os.environ.get("ASF_SKIP_STAGE25", "").lower() == "true":
+        return
+    model = _get_model()
+    if model is not None:
+        model("test")
+        print("[STAGE 2.5] DeBERTa warm-up complete", file=sys.stderr)
 
 
 def classify(tool_input: str) -> str:
@@ -58,22 +70,14 @@ def classify(tool_input: str) -> str:
             return "SAFE"
         return "UNCERTAIN"
     except Exception as e:
-        import sys
         print(f"[STAGE 2.5] Error: {e}", file=sys.stderr)
         return "UNCERTAIN"
 
 
-# Pre-load model on import (non-blocking, cached after first call)
-def _preload():
-    import os
-    if os.environ.get("ASF_DISABLE_STAGE25", "").lower() == "true":
-        return  # Disabled by default
-    try:
-        _get_model()
-    except Exception:
-        pass
-
-_preload()
+try:
+    warm_up()
+except Exception as e:
+    print(f"[STAGE 2.5] DeBERTa warm-up skipped: {e}", file=sys.stderr)
 
 def reset_cache():
     """Force reload of the model on next call."""

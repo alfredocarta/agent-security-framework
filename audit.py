@@ -7,6 +7,19 @@ _audit_lock = threading.Lock()
 _langfuse = None
 
 
+def _compliance_metadata(outcome: str) -> dict:
+    mapping = {
+        "KILL_SWITCH": ("Art. 9", "risk management"),
+        "ALLOWED": ("Art. 15", "accuracy"),
+        "HITL_REQUESTED": ("Art. 14", "human oversight"),
+        "OUTPUT_BLOCK": ("Art. 12", "record keeping"),
+    }
+    if outcome not in mapping:
+        return {}
+    article, control = mapping[outcome]
+    return {"eu_ai_act_article": article, "eu_ai_act_control": control}
+
+
 def _get_langfuse():
     global _langfuse
     if _langfuse is not None:
@@ -26,7 +39,8 @@ def _get_langfuse():
 
 class AuditTrail:
     def log_event(self, agent_id, action, outcome, reason,
-                  *, trace_id=None, latency_ms=None, confidence=None):
+                  *, trace_id=None, latency_ms=None, confidence=None,
+                  metadata=None, session_id=None):
         with _audit_lock:
             db = SessionLocal()
             try:
@@ -63,15 +77,38 @@ class AuditTrail:
         try:
             lf = _get_langfuse()
             if lf and trace_id:
-                trace = lf.trace(id=trace_id, name="security_interceptor", user_id=agent_id)
-                metadata = {"action": action}
+                trace = lf.trace(
+                    id=trace_id,
+                    name="security_interceptor",
+                    user_id=agent_id,
+                    session_id=session_id,
+                    input={"agent_id": agent_id, "tool_name": action},
+                    output=f"{outcome} - {reason}",
+                )
+                event_metadata = {"action": action}
                 if latency_ms is not None:
-                    metadata["latency_ms"] = latency_ms
+                    event_metadata["latency_ms"] = latency_ms
                 if confidence is not None:
-                    metadata["confidence"] = confidence
-                trace.event(name=outcome, input=reason, metadata=metadata)
+                    event_metadata["confidence"] = confidence
+                event_metadata.update(_compliance_metadata(outcome))
+                if metadata:
+                    event_metadata.update(metadata)
+                trace.event(
+                    name=outcome,
+                    input=reason,
+                    output=outcome,
+                    metadata=event_metadata,
+                )
         except Exception:
             pass
 
 
 AUDITOR = AuditTrail()
+
+def flush_langfuse():
+    try:
+        lf = _get_langfuse()
+        if lf:
+            lf.flush()
+    except Exception:
+        pass

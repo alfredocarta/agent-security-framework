@@ -104,7 +104,7 @@ def _stage3_llm(tool_input: str):
         print(f"[STAGE 3] LLM unavailable ({e}). Failing closed.", file=__import__("sys").stderr)
         return True
 
-def security_interceptor(agent_id, tool_name, tool_input):
+def security_interceptor(agent_id, tool_name, tool_input, session_id=None):
     trace_id = uuid.uuid4().hex
     t0 = time.monotonic()
 
@@ -113,90 +113,94 @@ def security_interceptor(agent_id, tool_name, tool_input):
 
     print(f"\n[SECURITY] Analyzing: {agent_id} -> {tool_name}", file=__import__("sys").stderr)
     AUDITOR.log_event(agent_id, tool_name, "INTERCEPTOR_START", "Interceptor invoked",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
 
     allowed_tools = registry.get_agent_permissions(agent_id)
     if not allowed_tools:
         AUDITOR.log_event(agent_id, tool_name, "BLOCKED", "Agent suspended or not found",
-                          trace_id=trace_id, latency_ms=_ms())
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "DENY", "ACCESS DENIED: Agent is suspended."
 
     if tool_name not in allowed_tools:
         AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Tool '{tool_name}' not in permissions: {allowed_tools}",
-                          trace_id=trace_id, latency_ms=_ms())
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "DENY", f"ACCESS DENIED: '{tool_name}' not authorized for {agent_id}."
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_1_START", "Regex pattern analysis",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     is_dangerous, matched_pattern = _stage1_regex(tool_input)
     if is_dangerous:
         registry.suspend_agent(agent_id)
         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", f"Stage 1 regex match: {matched_pattern}",
-                          trace_id=trace_id, latency_ms=_ms())
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "DENY", "KILL SWITCH ACTIVATED (pattern detected)."
     AUDITOR.log_event(agent_id, tool_name, "STAGE_1_PASS", "No dangerous pattern matched",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2_START", "ML classifier analysis",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     verdict, confidence = _stage2_classifier(tool_input)
     print(f"[STAGE 2] Verdict: {verdict} (confidence: {confidence:.2f})", file=__import__("sys").stderr)
 
     if verdict == "DANGEROUS":
         registry.suspend_agent(agent_id)
         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", f"Stage 2 BLOCK: dangerous_proba >= {BLOCK_THRESHOLD} (confidence: {confidence:.2f})",
-                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence)
+                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
         return "DENY", f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
 
     if verdict == "SAFE":
         if os.environ.get("ASF_ALWAYS_LLM", "").lower() == "true":
             AUDITOR.log_event(agent_id, tool_name, "STAGE_3_DOUBLE_CHECK", "ASF_ALWAYS_LLM active",
-                              trace_id=trace_id, latency_ms=_ms(), confidence=confidence)
+                              trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
+                              metadata={"model": "gemma2:2b", "provider": "ollama"})
             if _stage3_llm(tool_input):
                 registry.suspend_agent(agent_id)
                 AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 3 double-check: dangerous",
-                                  trace_id=trace_id, latency_ms=_ms())
+                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
                 return "DENY", "KILL SWITCH ACTIVATED (Stage 3 double-check)."
         AUDITOR.log_event(agent_id, tool_name, "ALLOWED", f"Stage 2 PASS: dangerous_proba <= {PASS_THRESHOLD} (confidence: {confidence:.2f})",
-                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence)
+                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
         return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2_UNCERTAIN", f"Classifier uncertain, dangerous_proba in grey zone (confidence: {confidence:.2f})",
-                      trace_id=trace_id, latency_ms=_ms(), confidence=confidence)
+                      trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
     print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
 
     # Stage 2.5: DeBERTa fast gate
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_START", "DeBERTa fast gate",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     stage25_verdict = _stage25_classify(tool_input)
     print(f"[STAGE 2.5] DeBERTa verdict: {stage25_verdict}", file=__import__("sys").stderr)
     if stage25_verdict == "DANGEROUS":
         registry.suspend_agent(agent_id)
         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 2.5 DeBERTa: dangerous",
-                          trace_id=trace_id, latency_ms=_ms())
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)."
     if stage25_verdict == "SAFE":
         AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 2.5 DeBERTa: safe",
-                          trace_id=trace_id, latency_ms=_ms())
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "ALLOW", "Authorized (Stage 2.5 DeBERTa cleared)."
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_UNCERTAIN", "DeBERTa uncertain, escalating to Stage 3",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     print(f"[STAGE 2.5] DeBERTa uncertain, escalating to Stage 3 LLM.", file=__import__("sys").stderr)
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "LLM semantic analysis",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                      metadata={"model": "gemma2:2b", "provider": "ollama"})
     if _stage3_llm(tool_input):
         AUDITOR.log_event(agent_id, tool_name, "HITL_REQUESTED", "Stage 3 LLM flagged as dangerous",
-                          trace_id=trace_id, latency_ms=_ms())
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                          metadata={"model": "gemma2:2b", "provider": "ollama"})
         return "HITL", "Action paused for HUMAN APPROVAL (flagged by Stage 3 LLM)."
 
     AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 3 LLM cleared - safe input",
-                      trace_id=trace_id, latency_ms=_ms())
+                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                      metadata={"model": "gemma2:2b", "provider": "ollama"})
     return "ALLOW", "Authorized."
 
 
-def hardened_interceptor(agent_id, tool_name, tool_input):
+def hardened_interceptor(agent_id, tool_name, tool_input, session_id=None):
     """
     Entry point with L1.5 hardening active.
     Applies classifier_gate, decode-and-rescan, spotlighting and canary trap
@@ -204,4 +208,11 @@ def hardened_interceptor(agent_id, tool_name, tool_input):
     Use this instead of security_interceptor for production deployments.
     """
     from hardening import apply_l1_5_hardening
-    return apply_l1_5_hardening(agent_id, tool_name, tool_input, security_interceptor)
+    if session_id is None:
+        return apply_l1_5_hardening(agent_id, tool_name, tool_input, security_interceptor)
+    return apply_l1_5_hardening(
+        agent_id,
+        tool_name,
+        tool_input,
+        lambda a, t, i: security_interceptor(a, t, i, session_id=session_id),
+    )
