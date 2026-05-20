@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json as _json
 import math
 import re
 import unicodedata
@@ -213,9 +214,35 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         reason = ""
     return ClassifierResult(score=score, features=features, blocked=blocked, reason=reason)
 
+def _classifier_gate_score(tool_input):
+    result = classify_text(tool_input)
+    feature_score = max(result.features.values(), default=0.0)
+    return max(result.score, feature_score)
+
 def classifier_gate(tool_input):
     result = classify_text(tool_input)
     return result.blocked, result.score
+
+def _extract_text_fields(tool_input: str) -> list[str]:
+    fields = []
+    try:
+        parsed = _json.loads(tool_input)
+        if isinstance(parsed, dict):
+            for value in parsed.values():
+                if isinstance(value, str) and value.strip():
+                    fields.append(value)
+        elif isinstance(parsed, str):
+            fields.append(parsed)
+    except (_json.JSONDecodeError, TypeError):
+        fields.append(tool_input)
+    return fields
+
+def _cross_field_classify(tool_input: str) -> float:
+    fields = _extract_text_fields(tool_input)
+    if len(fields) <= 1:
+        return 0.0
+    aggregate = " ".join(fields)
+    return _classifier_gate_score(aggregate)
 
 def decode_and_rescan(tool_input, stage1_regex_fn=None):
     import codecs
@@ -287,6 +314,10 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     if decode_and_rescan(tool_input):
         print("[L1.5] Decode-and-rescan detected encoded payload", file=sys.stderr)
         return "DENY", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)", None
+    cross_score = _cross_field_classify(tool_input)
+    if cross_score >= 0.5:
+        print(f"[L1.5] Cross-field correlation detected (score={cross_score:.2f})", file=sys.stderr)
+        return "DENY", "BLOCKED by L1.5 cross-field correlation", None
     if interceptor_fn is None:
         return "ALLOW", "Authorized by L1.5 hardening checks.", None
     _, spotted_input = spotlight_message(tool_input)
