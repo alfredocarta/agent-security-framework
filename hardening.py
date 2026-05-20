@@ -22,6 +22,15 @@ _SPOTLIGHT_INSTRUCTION = (
 )
 _CANARY_TEMPLATE = " [ref:{canary}] "
 _MIN_CANARY_LENGTH = 100
+ZERO_WIDTH_CHARS = frozenset([
+    '\u200b',  # Zero Width Space
+    '\u200c',  # Zero Width Non-Joiner
+    '\u200d',  # Zero Width Joiner
+    '\ufeff',  # BOM / Zero Width No-Break Space
+    '\u2060',  # Word Joiner
+    '\u00ad',  # Soft Hyphen
+])
+UNICODE_TAGS_RANGE = (0xE0000, 0xE007F)
 
 @dataclass
 class ClassifierResult:
@@ -35,7 +44,23 @@ _FEATURE_WEIGHTS = {
     "base64": 0.20, "rot13": 0.15, "structural": 0.20,
     "unicode": 0.15, "known_payloads": 0.25,
     "instruction_lang": 0.15, "entropy": 0.10,
+    "zero_width": 1.0,
 }
+
+def _strip_zero_width(text: str) -> tuple[str, bool]:
+    found = False
+    cleaned = []
+    for ch in text:
+        cp = ord(ch)
+        if ch in ZERO_WIDTH_CHARS or (UNICODE_TAGS_RANGE[0] <= cp <= UNICODE_TAGS_RANGE[1]):
+            found = True
+        else:
+            cleaned.append(ch)
+    return ''.join(cleaned), found
+
+def _detect_zero_width(text: str) -> float:
+    _, found = _strip_zero_width(text)
+    return 1.0 if found else 0.0
 
 def _detect_base64(text):
     b64_pattern = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
@@ -141,6 +166,7 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         'known_payloads': _detect_known_payloads(text),
         'instruction_lang': _detect_instruction_language(text),
         'entropy': _compute_entropy(text),
+        'zero_width': _detect_zero_width(text),
     }
     critical = {f: v for f, v in features.items() if v >= 0.7}
     total_w = sum(_FEATURE_WEIGHTS.values())
@@ -214,15 +240,23 @@ def canary_trap(tool_input):
 def canary_verify(output, canary):
     return canary in str(output)
 
-def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn):
+def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     import sys
-    should_block, score = classifier_gate(tool_input)
+    original_input = str(tool_input)
+    cleaned_input, had_zero_width = _strip_zero_width(original_input)
+    if had_zero_width:
+        print("[L1.5] Zero-width characters detected and stripped", file=sys.stderr)
+    tool_input = cleaned_input
+
+    should_block, score = classifier_gate(original_input)
     if should_block:
         print(f"[L1.5] Classifier gate blocked (score={score:.2f})", file=sys.stderr)
         return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})", None
     if decode_and_rescan(tool_input):
         print("[L1.5] Decode-and-rescan detected encoded payload", file=sys.stderr)
         return "DENY", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)", None
+    if interceptor_fn is None:
+        return "ALLOW", "Authorized by L1.5 hardening checks.", None
     _, spotted_input = spotlight_message(tool_input)
     print("[L1.5] Spotlighting applied", file=sys.stderr)
     instrumented_input, canary = canary_trap(spotted_input)
