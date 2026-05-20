@@ -4,7 +4,9 @@ import uuid
 import time
 import yaml
 import os
-import pickle
+import hashlib
+import sys
+import joblib
 from langchain_openai import ChatOpenAI
 import registry
 from audit import AUDITOR
@@ -34,13 +36,36 @@ def _build_llm():
 
 security_llm = _build_llm()
 
+def _verify_classifier_hash(path: str) -> bool:
+    hash_path = path + ".sha256"
+    if not os.path.exists(hash_path):
+        print(
+            f"[STAGE 2] WARNING: no hash file at {hash_path}, skipping integrity check",
+            file=sys.stderr
+        )
+        return True
+
+    with open(hash_path, "r") as f:
+        expected = f.read().strip()
+    with open(path, "rb") as f:
+        actual = hashlib.sha256(f.read()).hexdigest()
+
+    if actual != expected:
+        print(
+            "[STAGE 2] CRITICAL: classifier hash mismatch - possible tampering",
+            file=sys.stderr
+        )
+        return False
+    return True
+
 def _load_classifier():
     if not os.path.exists(CLASSIFIER_PATH):
         raise FileNotFoundError(
             "classifier.pkl not found. Run: python train_classifier.py"
         )
-    with open(CLASSIFIER_PATH, "rb") as f:
-        return pickle.load(f)
+    if not _verify_classifier_hash(CLASSIFIER_PATH):
+        raise RuntimeError("Classifier integrity check failed - refusing to load")
+    return joblib.load(CLASSIFIER_PATH)
 
 _classifier = _load_classifier()
 
