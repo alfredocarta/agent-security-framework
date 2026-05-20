@@ -34,7 +34,24 @@ def _build_llm():
         request_timeout=cfg.get("timeout", 10)
     )
 
-security_llm = _build_llm()
+_security_llm = None
+_llm_init_attempted = False
+
+def _get_llm():
+    global _security_llm, _llm_init_attempted
+    if _llm_init_attempted:
+        return _security_llm
+    _llm_init_attempted = True
+    try:
+        _security_llm = _build_llm()
+        print("[STAGE 3] LLM initialized successfully", file=sys.stderr)
+    except Exception as e:
+        print(
+            f"[STAGE 3] LLM init failed, Stage 3 will fail-closed: {e}",
+            file=sys.stderr
+        )
+        _security_llm = None
+    return _security_llm
 
 def _verify_classifier_hash(path: str) -> bool:
     hash_path = path + ".sha256"
@@ -98,7 +115,11 @@ def _stage2_classifier(tool_input: str):
 
 def _stage3_llm(tool_input: str):
     if os.environ.get("ASF_SKIP_LLM", "").lower() == "true":
-        print("[STAGE 3] ASF_SKIP_LLM=true, failing closed.", file=__import__("sys").stderr)
+        print("[STAGE 3] ASF_SKIP_LLM=true, failing closed.", file=sys.stderr)
+        return True
+    llm = _get_llm()
+    if llm is None:
+        print("[STAGE 3] LLM unavailable, failing closed", file=sys.stderr)
         return True
     try:
         spotlight_note = (
@@ -123,10 +144,10 @@ def _stage3_llm(tool_input: str):
             f"Input to analyze: <input>{tool_input}</input>\n\n"
             "Response:"
         )
-        analysis = security_llm.invoke(prompt).content.strip().upper()
+        analysis = llm.invoke(prompt).content.strip().upper()
         return "DANGEROUS" in analysis
     except Exception as e:
-        print(f"[STAGE 3] LLM unavailable ({e}). Failing closed.", file=__import__("sys").stderr)
+        print(f"[STAGE 3] LLM unavailable ({e}). Failing closed.", file=sys.stderr)
         return True
 
 def security_interceptor(agent_id, tool_name, tool_input, session_id=None):
