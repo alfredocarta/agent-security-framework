@@ -9,6 +9,52 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
+# Pre-compiled regex patterns (module load, not per-call)
+_RE_BASE64_CANDIDATE = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
+_RE_ROT13_MARKER = re.compile(r'rot.?13', re.IGNORECASE)
+_RE_ROT13_PAYLOAD = re.compile(r'ROT13[^:]*:\s*(.{20,200})', re.IGNORECASE)
+_RE_STRUCTURAL_OPEN_TAG = re.compile(
+    r'<(?:IMPORTANT|system|instructions?|prompt|override)\s*>',
+    re.IGNORECASE,
+)
+_RE_STRUCTURAL_CLOSE_TAG = re.compile(
+    r'</(?:IMPORTANT|system|instructions?|prompt|override)\s*>',
+    re.IGNORECASE,
+)
+_RE_STRUCTURAL_ROLE_BRACKET = re.compile(
+    r'\[(?:SYSTEM|ASSISTANT|USER|INST|PROMPT)\]',
+    re.IGNORECASE,
+)
+_RE_STRUCTURAL_CHAT_TOKEN = re.compile(
+    r'<\|(?:im_start|im_end|system|user|assistant)\|>',
+    re.IGNORECASE,
+)
+_RE_STRUCTURAL_LONG_DELIMITER = re.compile(r'[-=]{10,}')
+_RE_KNOWN_PAYLOADS = (
+    (re.compile(r'you are (?:now )?(?:DAN|DUDE)'), 0.9),
+    (re.compile(r'act as (?:DAN|DUDE)'), 0.9),
+    (re.compile(r'developer mode (?:enabled|activated)'), 0.9),
+    (re.compile(r'broken free of .* confines'), 0.7),
+    (re.compile(r'submissive ai'), 0.8),
+    (re.compile(r'this prompt has been.*hijacked'), 0.9),
+    (re.compile(r'pass (?:its|the) content as .?sidenote'), 0.9),
+    (re.compile(r'stop everything.*now.*(?:print|say|output)'), 0.8),
+    (re.compile(r'your (?:new |real |actual )task'), 0.5),
+    (re.compile(r'disregard (?:all )?(?:previous|prior)'), 0.5),
+    (re.compile(r'ignore (?:all )?(?:previous|prior) (?:instructions?|rules)'), 0.5),
+    (re.compile(r'ignore .{0,30}instructions'), 0.75),
+    (re.compile(r'ignore .{0,10}rules'), 0.72),
+    (re.compile(r'new (?:task|instructions?|objective)'), 0.4),
+    (re.compile(r'drop\s+table'), 0.9),
+)
+_RE_INSTRUCTION_LANGUAGE = (
+    re.compile(r'(?:print|output|say|echo|write|return)\s+["\']'),
+    re.compile(r'(?:read|access|fetch|retrieve|open)\s+(?:~|/|\\|\.\.)'),
+    re.compile(r'(?:send|forward|redirect)\s+(?:all|the|every)'),
+    re.compile(r'(?:execute|run|eval)\s+(?:the|this|following)'),
+)
+_RE_HEX_STRIP_PREFIX_AND_SPACE = re.compile(r"0x|\s")
+
 _DELIMITER = "^"
 _EXTERNAL_DATA_FIELDS = frozenset({
     "file_content", "text", "data", "content", "document", "raw_text",
@@ -68,8 +114,7 @@ def _normalize_unicode(text: str) -> tuple[str, bool]:
     return normalized, changed
 
 def _detect_base64(text):
-    b64_pattern = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
-    matches = b64_pattern.findall(text)
+    matches = _RE_BASE64_CANDIDATE.findall(text)
     if not matches:
         return 0.0
     for m in sorted(matches, key=len, reverse=True):
@@ -84,9 +129,9 @@ def _detect_base64(text):
     return 0.1
 
 def _detect_rot13(text):
-    if re.search(r'rot.?13', text, re.I):
+    if _RE_ROT13_MARKER.search(text):
         import codecs
-        m = re.search(r'ROT13[^:]*:\s*(.{20,200})', text, re.I)
+        m = _RE_ROT13_PAYLOAD.search(text)
         if m:
             try:
                 decoded = codecs.decode(m.group(1), 'rot_13')
@@ -102,12 +147,13 @@ def _detect_rot13(text):
 
 def _detect_structural_markers(text):
     score = 0.0
-    if re.search(r'<(?:IMPORTANT|system|instructions?|prompt|override)\s*>', text, re.I): score += 0.5
-    if re.search(r'</(?:IMPORTANT|system|instructions?|prompt|override)\s*>', text, re.I): score += 0.3
-    if re.search(r'\[(?:SYSTEM|ASSISTANT|USER|INST|PROMPT)\]', text, re.I): score += 0.4
-    if re.search(r'<\|(?:im_start|im_end|system|user|assistant)\|>', text, re.I): score += 0.5
-    if re.search(r'[-=]{10,}', text):
-        score += min(0.3 * len(re.findall(r'[-=]{10,}', text)), 0.6)
+    if _RE_STRUCTURAL_OPEN_TAG.search(text): score += 0.5
+    if _RE_STRUCTURAL_CLOSE_TAG.search(text): score += 0.3
+    if _RE_STRUCTURAL_ROLE_BRACKET.search(text): score += 0.4
+    if _RE_STRUCTURAL_CHAT_TOKEN.search(text): score += 0.5
+    delimiter_matches = _RE_STRUCTURAL_LONG_DELIMITER.findall(text)
+    if delimiter_matches:
+        score += min(0.3 * len(delimiter_matches), 0.6)
     return min(score, 1.0)
 
 def _detect_unicode_anomalies(text):
@@ -124,33 +170,11 @@ def _detect_unicode_anomalies(text):
 
 def _detect_known_payloads(text):
     text_lower = text.lower()
-    signatures = [
-        (r'you are (?:now )?(?:DAN|DUDE)', 0.9),
-        (r'act as (?:DAN|DUDE)', 0.9),
-        (r'developer mode (?:enabled|activated)', 0.9),
-        (r'broken free of .* confines', 0.7),
-        (r'submissive ai', 0.8),
-        (r'this prompt has been.*hijacked', 0.9),
-        (r'pass (?:its|the) content as .?sidenote', 0.9),
-        (r'stop everything.*now.*(?:print|say|output)', 0.8),
-        (r'your (?:new |real |actual )task', 0.5),
-        (r'disregard (?:all )?(?:previous|prior)', 0.5),
-        (r'ignore (?:all )?(?:previous|prior) (?:instructions?|rules)', 0.5),
-        (r'ignore .{0,30}instructions', 0.75),
-        (r'ignore .{0,10}rules', 0.72),
-        (r'new (?:task|instructions?|objective)', 0.4),
-    ]
-    return max((w for p, w in signatures if re.search(p, text_lower)), default=0.0)
+    return max((w for pattern, w in _RE_KNOWN_PAYLOADS if pattern.search(text_lower)), default=0.0)
 
 def _detect_instruction_language(text):
     text_lower = text.lower()
-    patterns = [
-        r'(?:print|output|say|echo|write|return)\s+["\']',
-        r'(?:read|access|fetch|retrieve|open)\s+(?:~|/|\\|\.\.)',
-        r'(?:send|forward|redirect)\s+(?:all|the|every)',
-        r'(?:execute|run|eval)\s+(?:the|this|following)',
-    ]
-    return min(sum(1 for p in patterns if re.search(p, text_lower)) * 0.3, 1.0)
+    return min(sum(1 for pattern in _RE_INSTRUCTION_LANGUAGE if pattern.search(text_lower)) * 0.3, 1.0)
 
 def _compute_entropy(text):
     if not text: return 0.0
@@ -198,7 +222,7 @@ def decode_and_rescan(tool_input, stage1_regex_fn=None):
     decoders = [
         ('base64', lambda s: base64.b64decode(s).decode('utf-8', errors='ignore')),
         ('base32', lambda s: base64.b32decode(s).decode('utf-8', errors='ignore')),
-        ('hex',    lambda s: binascii.unhexlify(re.sub(r"0x|\s", "", s)).decode('utf-8', errors='ignore')),
+        ('hex',    lambda s: binascii.unhexlify(_RE_HEX_STRIP_PREFIX_AND_SPACE.sub("", s)).decode('utf-8', errors='ignore')),
         ('rot13',  lambda s: codecs.decode(s, "rot_13")),
     ]
     for name, decode_fn in decoders:
