@@ -56,6 +56,18 @@ _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:execute|run|eval)\s+(?:the|this|following)'),
 )
 _RE_HEX_STRIP_PREFIX_AND_SPACE = re.compile(r"0x|\s")
+_RE_HIDDEN_STYLE = re.compile(
+    r'style\s*=\s*["\'][^"\']*(?:'
+    r'font-size\s*:\s*0|'
+    r'display\s*:\s*none|'
+    r'visibility\s*:\s*hidden|'
+    r'opacity\s*:\s*0|'
+    r'color\s*:\s*(?:white|#fff(?:fff)?|rgba?\([^)]*,\s*0\))'
+    r')[^"\']*["\']',
+    re.IGNORECASE,
+)
+_RE_HTML_TAG_OPEN = re.compile(r'<(\w+)')
+_RE_HTML_TAG_CONTENT = re.compile(r'<[^>]+>(.*?)</[^>]+>', re.DOTALL)
 
 _DELIMITER = "^"
 _EXTERNAL_DATA_FIELDS = frozenset({
@@ -114,6 +126,49 @@ def _normalize_unicode(text: str) -> tuple[str, bool]:
     normalized = unicodedata.normalize('NFKC', text)
     changed = normalized != text
     return normalized, changed
+
+def _extract_hidden_html_text(text: str) -> tuple[list[str], bool]:
+    hidden_texts = []
+    for match in _RE_HIDDEN_STYLE.finditer(text):
+        tag_start = text.rfind('<', 0, match.start())
+        if tag_start == -1:
+            continue
+        tag_end = text.find('>', match.end())
+        if tag_end == -1:
+            continue
+        tag_name_match = _RE_HTML_TAG_OPEN.match(text[tag_start:])
+        if not tag_name_match:
+            continue
+        tag_name = tag_name_match.group(1)
+        close_tag = f'</{tag_name}>'
+        close_pos = text.find(close_tag, tag_end + 1)
+        if close_pos == -1:
+            continue
+        inner = text[tag_end + 1:close_pos].strip()
+        if inner:
+            hidden_texts.append(inner)
+    return hidden_texts, len(hidden_texts) > 0
+
+def _strip_hidden_html_text(text: str) -> str:
+    spans = []
+    for match in _RE_HIDDEN_STYLE.finditer(text):
+        tag_start = text.rfind('<', 0, match.start())
+        if tag_start == -1:
+            continue
+        tag_end = text.find('>', match.end())
+        if tag_end == -1:
+            continue
+        tag_name_match = _RE_HTML_TAG_OPEN.match(text[tag_start:])
+        if not tag_name_match:
+            continue
+        close_tag = f'</{tag_name_match.group(1)}>'
+        close_pos = text.find(close_tag, tag_end + 1)
+        if close_pos == -1:
+            continue
+        spans.append((tag_start, close_pos + len(close_tag)))
+    for start, end in reversed(spans):
+        text = text[:start] + text[end:]
+    return text
 
 def _detect_base64(text):
     matches = _RE_BASE64_CANDIDATE.findall(text)
@@ -220,6 +275,14 @@ def _classifier_gate_score(tool_input):
     if result.blocked:
         return 1.0
     return result.score
+
+def _detect_hidden_html(text: str) -> float:
+    hidden_texts, found = _extract_hidden_html_text(text)
+    if not found:
+        return 0.0
+    combined = ' '.join(hidden_texts)
+    score = _classifier_gate_score(combined)
+    return score if score > 0 else 0.3
 
 def classifier_gate(tool_input):
     result = classify_text(tool_input)
@@ -339,6 +402,19 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     tool_input, was_normalized = _normalize_unicode(cleaned_input)
     if was_normalized:
         print("[L1.5] Unicode normalization applied (NFKC)", file=sys.stderr)
+
+    hidden_texts, has_hidden = _extract_hidden_html_text(tool_input)
+    if has_hidden:
+        print(f"[L1.5] Hidden HTML text detected ({len(hidden_texts)} element(s))", file=sys.stderr)
+        combined_hidden = ' '.join(hidden_texts)
+        hidden_score = _classifier_gate_score(combined_hidden)
+        if hidden_score >= 0.2:
+            return "DENY", f"BLOCKED by L1.5 hidden HTML content (score={hidden_score:.2f})", None
+        print(
+            f"[L1.5] Hidden HTML text found but score below threshold ({hidden_score:.2f}), continuing",
+            file=sys.stderr
+        )
+        tool_input = _strip_hidden_html_text(tool_input)
 
     classifier_input = tool_input if not had_zero_width else original_input
     should_block, score = classifier_gate(classifier_input)
