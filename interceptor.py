@@ -16,18 +16,23 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
 CLASSIFIER_PATH = os.path.join(BASE_DIR, "classifier.pkl")
 
-BLOCK_THRESHOLD = 0.85
-PASS_THRESHOLD = 0.25
-
 def _load_policies():
     with open(POLICIES_PATH, "r") as f:
         return yaml.safe_load(f)
 
+_policies = _load_policies()
+_detection = _policies.get("detection", {})
+BLOCK_THRESHOLD = float(_detection.get("block_threshold", 0.85))
+PASS_THRESHOLD = float(_detection.get("pass_threshold", 0.25))
+
 def _build_llm():
-    policies = _load_policies()
-    cfg = policies.get("llm", {})
+    cfg = _policies.get("llm", {})
+    base_url = os.environ.get(
+        "OLLAMA_BASE_URL",
+        cfg.get("base_url", "http://localhost:11434/v1")
+    )
     return ChatOpenAI(
-        base_url=cfg.get("base_url", "http://localhost:1234/v1"),
+        base_url=base_url,
         api_key=cfg.get("api_key", "lm-studio"),
         model_name=cfg.get("model", "google/gemma-3-4b"),
         temperature=0,

@@ -1,3 +1,6 @@
+# Detection thresholds can be overridden here.
+# LLM base_url can be overridden with OLLAMA_BASE_URL env var.
+
 agents:
   triage_agent:
     risk_level: medium
@@ -17,6 +20,9 @@ agents:
       - read_docs
 
 detection:
+  block_threshold: 0.85
+  pass_threshold: 0.25
+  stage25_dangerous_threshold: 0.7
   patterns:
     - "(?i)\\bDROP\\s+TABLE\\b"
     - "(?i)\\bDELETE\\s+FROM\\b"
