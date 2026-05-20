@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import json as _json
 import math
 import re
@@ -216,8 +217,9 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
 
 def _classifier_gate_score(tool_input):
     result = classify_text(tool_input)
-    feature_score = max(result.features.values(), default=0.0)
-    return max(result.score, feature_score)
+    if result.blocked:
+        return 1.0
+    return result.score
 
 def classifier_gate(tool_input):
     result = classify_text(tool_input)
@@ -244,23 +246,55 @@ def _cross_field_classify(tool_input: str) -> float:
     aggregate = " ".join(fields)
     return _classifier_gate_score(aggregate)
 
-def decode_and_rescan(tool_input, stage1_regex_fn=None):
-    import codecs
-    decoders = [
-        ('base64', lambda s: base64.b64decode(s).decode('utf-8', errors='ignore')),
-        ('base32', lambda s: base64.b32decode(s).decode('utf-8', errors='ignore')),
-        ('hex',    lambda s: binascii.unhexlify(_RE_HEX_STRIP_PREFIX_AND_SPACE.sub("", s)).decode('utf-8', errors='ignore')),
-        ('rot13',  lambda s: codecs.decode(s, "rot_13")),
-    ]
-    for name, decode_fn in decoders:
+def _is_readable(text: str) -> bool:
+    if not text:
+        return False
+    printable = sum(1 for ch in text if 32 <= ord(ch) <= 126 or ch in '\n\r\t')
+    return printable / len(text) >= 0.8
+
+def _try_decode_all(text: str) -> tuple[str, bool]:
+    stripped = text.strip()
+    decoders = (
+        lambda s: base64.b64decode(s, validate=True).decode('utf-8', errors='strict'),
+        lambda s: base64.b32decode(s, casefold=True).decode('utf-8', errors='strict'),
+        lambda s: binascii.unhexlify(_RE_HEX_STRIP_PREFIX_AND_SPACE.sub("", s)).decode('utf-8', errors='strict'),
+        lambda s: codecs.decode(s, "rot_13"),
+    )
+    for decode_fn in decoders:
         try:
-            decoded = decode_fn(tool_input.strip())
-            if decoded == tool_input: continue
-            if classify_text(decoded, threshold=0.2).blocked: return True
-            if stage1_regex_fn and stage1_regex_fn(decoded): return True
+            decoded = decode_fn(stripped)
         except Exception:
             continue
-    return False
+        if decoded != text and _is_readable(decoded):
+            return decoded, True
+    return text, False
+
+def _decode_recursive(text: str, max_depth: int = 3) -> tuple[str, int]:
+    current = text
+    decoded_depth = 0
+    for depth in range(1, max_depth + 1):
+        decoded, changed = _try_decode_all(current)
+        if not changed:
+            break
+        current = decoded
+        decoded_depth = depth
+    return current, decoded_depth
+
+def decode_and_rescan(tool_input, stage1_regex_fn=None):
+    current = tool_input
+    for depth in range(1, 4):
+        decoded, changed = _try_decode_all(current)
+        if not changed:
+            break
+        score = _classifier_gate_score(decoded)
+        if score >= 0.2:
+            print(f"[L1.5] Encoding bypass detected at depth {depth} (score={score:.2f})", file=__import__("sys").stderr)
+            return decoded, score
+        if stage1_regex_fn and stage1_regex_fn(decoded):
+            print(f"[L1.5] Encoding bypass detected at depth {depth} (stage1)", file=__import__("sys").stderr)
+            return decoded, 1.0
+        current = decoded
+    return current, 0.0
 
 def datamark(text, delimiter=_DELIMITER):
     lines = text.split('\n')
@@ -311,7 +345,8 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     if should_block:
         print(f"[L1.5] Classifier gate blocked (score={score:.2f})", file=sys.stderr)
         return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})", None
-    if decode_and_rescan(tool_input):
+    _, decode_score = decode_and_rescan(tool_input)
+    if decode_score >= 0.2:
         print("[L1.5] Decode-and-rescan detected encoded payload", file=sys.stderr)
         return "DENY", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)", None
     cross_score = _cross_field_classify(tool_input)
