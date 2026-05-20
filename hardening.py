@@ -56,6 +56,11 @@ _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:execute|run|eval)\s+(?:the|this|following)'),
 )
 _RE_HEX_STRIP_PREFIX_AND_SPACE = re.compile(r"0x|\s")
+_RE_ENCODING_REQUEST = re.compile(
+    r'\b(?:decode|decoded|encoded|what\s+does\s+this\s+mean)\b',
+    re.IGNORECASE,
+)
+_RE_HEX_TOKEN = re.compile(r'\b(?:0x)?[0-9a-fA-F]{4,}\b')
 _RE_HIDDEN_STYLE = re.compile(
     r'style\s*=\s*["\'][^"\']*(?:'
     r'font-size\s*:\s*0|'
@@ -343,7 +348,35 @@ def _decode_recursive(text: str, max_depth: int = 3) -> tuple[str, int]:
         decoded_depth = depth
     return current, decoded_depth
 
+def _decode_embedded_hex(text: str) -> tuple[str, bool]:
+    if not _RE_ENCODING_REQUEST.search(text):
+        return text, False
+    decoded_parts = []
+    for match in _RE_HEX_TOKEN.finditer(text):
+        token = match.group(0)
+        cleaned = token[2:] if token.lower().startswith("0x") else token
+        if len(cleaned) % 2 != 0:
+            continue
+        try:
+            decoded = binascii.unhexlify(cleaned).decode('utf-8', errors='strict')
+        except Exception:
+            continue
+        if _is_readable(decoded):
+            decoded_parts.append(decoded)
+    if not decoded_parts:
+        return text, False
+    return " ".join(decoded_parts), True
+
 def decode_and_rescan(tool_input, stage1_regex_fn=None):
+    embedded_decoded, embedded_changed = _decode_embedded_hex(tool_input)
+    if embedded_changed:
+        score = _classifier_gate_score(embedded_decoded)
+        if score >= 0.2:
+            print(f"[L1.5] Embedded hex encoding bypass detected (score={score:.2f})", file=__import__("sys").stderr)
+            return embedded_decoded, score
+        print("[L1.5] Embedded hex encoding request detected", file=__import__("sys").stderr)
+        return embedded_decoded, 0.3
+
     current = tool_input
     for depth in range(1, 4):
         decoded, changed = _try_decode_all(current)
