@@ -232,6 +232,24 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None):
                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "ALLOW", "Authorized (Stage 2.5 DeBERTa cleared)."
 
+    if os.environ.get("ASF_DISABLE_STAGE25B", "").lower() != "true":
+        try:
+            AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5B_START", "Prompt Guard injection gate",
+                              trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+            from stage25b_promptguard import classify_text as _stage25b_classify
+            stage25b_verdict = _stage25b_classify(tool_input)
+            print(f"[STAGE 2.5b] Prompt Guard verdict: {stage25b_verdict}", file=sys.stderr)
+            if stage25b_verdict == "DANGEROUS":
+                registry.suspend_agent(agent_id)
+                AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 2.5b Prompt Guard: dangerous",
+                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)."
+            if stage25b_verdict == "UNAVAILABLE":
+                AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5B_UNAVAILABLE", "Prompt Guard unavailable",
+                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+        except Exception as exc:
+            print(f"[STAGE 2.5b] Skipped due to error: {exc}", file=sys.stderr)
+
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_UNCERTAIN", "DeBERTa uncertain, escalating to Stage 3",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     print(f"[STAGE 2.5] DeBERTa uncertain, escalating to Stage 3 LLM.", file=__import__("sys").stderr)

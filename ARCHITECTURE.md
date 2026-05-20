@@ -24,6 +24,7 @@ conda environment. This includes:
 - Stage 1 regex kill switches
 - Stage 2 TF-IDF + Random Forest classifier
 - Stage 2.5 DeBERTa classifier
+- Stage 2.5b Prompt Guard-style injection specialist ensemble gate
 - Stage 3 semantic LLM calls to Ollama
 - SQLite registry and audit trail
 
@@ -43,6 +44,32 @@ model loaded on host
 
 Ollama also runs on the host at `localhost:11434` and serves `gemma2:2b` for
 Stage 3.
+
+## Stage 2.5b ensemble gate
+
+Stage 2.5b is an optional injection-specialist gate that runs only when the
+Stage 2 TF-IDF classifier is uncertain and Stage 2.5a DeBERTa also returns
+`UNCERTAIN`. This keeps the common fast path unchanged while allowing a second
+model to catch prompt-injection-specific misses before Stage 3.
+
+Current behavior:
+
+- primary candidate: `meta-llama/Llama-Prompt-Guard-2-86M`
+- local availability: HuggingFace reports the model as manually gated, and the
+  unauthenticated environment cannot download it
+- fallback candidate: `ProtectAI/deberta-v3-base-prompt-injection-v2`
+- runtime contract: returns `DANGEROUS`, `SAFE`, `UNCERTAIN`, or `UNAVAILABLE`
+- fail behavior: returns `UNAVAILABLE` and is skipped if loading or inference
+  fails
+- disable flag: `ASF_DISABLE_STAGE25B=true`
+
+Ensemble logic:
+
+- Stage 2.5a `DANGEROUS`: block immediately
+- Stage 2.5a `SAFE`: allow without Stage 2.5b
+- Stage 2.5a `UNCERTAIN`: run Stage 2.5b
+- Stage 2.5b `DANGEROUS`: block
+- Stage 2.5b `SAFE`, `UNCERTAIN`, or `UNAVAILABLE`: continue to Stage 3
 
 ## Why DeBERTa runs on the host today
 
@@ -66,6 +93,8 @@ Recommended deployment shape:
 - `asf-api` or application process: runs the interceptor and registry client
 - `stage25-deberta`: FastAPI service loading the HuggingFace model once at
   container startup
+- `stage25b-promptguard`: optional FastAPI service for the Prompt Guard-style
+  injection specialist once the preferred model is accessible
 - `ollama` or managed LLM endpoint: Stage 3 fallback
 - `langfuse` + `postgres`: observability stack
 
