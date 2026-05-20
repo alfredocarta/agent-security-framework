@@ -62,6 +62,11 @@ def _detect_zero_width(text: str) -> float:
     _, found = _strip_zero_width(text)
     return 1.0 if found else 0.0
 
+def _normalize_unicode(text: str) -> tuple[str, bool]:
+    normalized = unicodedata.normalize('NFKC', text)
+    changed = normalized != text
+    return normalized, changed
+
 def _detect_base64(text):
     b64_pattern = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
     matches = b64_pattern.findall(text)
@@ -246,9 +251,12 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     cleaned_input, had_zero_width = _strip_zero_width(original_input)
     if had_zero_width:
         print("[L1.5] Zero-width characters detected and stripped", file=sys.stderr)
-    tool_input = cleaned_input
+    tool_input, was_normalized = _normalize_unicode(cleaned_input)
+    if was_normalized:
+        print("[L1.5] Unicode normalization applied (NFKC)", file=sys.stderr)
 
-    should_block, score = classifier_gate(original_input)
+    classifier_input = tool_input if not had_zero_width else original_input
+    should_block, score = classifier_gate(classifier_input)
     if should_block:
         print(f"[L1.5] Classifier gate blocked (score={score:.2f})", file=sys.stderr)
         return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})", None

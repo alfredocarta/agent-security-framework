@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import os
 import sys
+import unicodedata
 
 _MODEL = None
 
@@ -61,6 +62,7 @@ def classify(tool_input: str) -> str:
             clean = ' '.join(json_values)
         else:
             clean = re.sub(r'\s+', ' ', clean).strip()
+        clean = unicodedata.normalize('NFKC', clean)
         result = model(clean)
         label = result[0]['label']
         score = result[0]['score']
@@ -72,6 +74,10 @@ def classify(tool_input: str) -> str:
     except Exception as e:
         print(f"[STAGE 2.5] Error: {e}", file=sys.stderr)
         return "UNCERTAIN"
+
+
+def classify_text(text: str) -> str:
+    return classify(text)
 
 
 try:
