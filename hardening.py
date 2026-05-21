@@ -94,14 +94,39 @@ _SPOTLIGHT_INSTRUCTION = (
 _CANARY_TEMPLATE = " [ref:{canary}] "
 _MIN_CANARY_LENGTH = 100
 ZERO_WIDTH_CHARS = frozenset([
+    # Original set
     '\u200b',  # Zero Width Space
     '\u200c',  # Zero Width Non-Joiner
     '\u200d',  # Zero Width Joiner
     '\ufeff',  # BOM / Zero Width No-Break Space
     '\u2060',  # Word Joiner
     '\u00ad',  # Soft Hyphen
+    # Directional controls
+    '\u202a',  # Left-to-Right Embedding
+    '\u202b',  # Right-to-Left Embedding
+    '\u202c',  # Pop Directional Formatting
+    '\u202d',  # Left-to-Right Override
+    '\u202e',  # Right-to-Left Override
+    '\u2066',  # Left-to-Right Isolate
+    '\u2067',  # Right-to-Left Isolate
+    '\u2068',  # First Strong Isolate
+    '\u2069',  # Pop Directional Isolate
+    # Additional zero-width
+    '\u200e',  # Left-to-Right Mark
+    '\u200f',  # Right-to-Left Mark
+    '\u061c',  # Arabic Letter Mark
+    '\u115f',  # Hangul Choseong Filler
+    '\u1160',  # Hangul Jungseong Filler
+    '\u17b4',  # Khmer Vowel Inherent Aq
+    '\u17b5',  # Khmer Vowel Inherent Aa
+    '\u3164',  # Hangul Filler
+    '\uffa0',  # Halfwidth Hangul Filler
 ])
-UNICODE_TAGS_RANGE = (0xE0000, 0xE007F)
+ZERO_WIDTH_RANGES = [
+    (0x0000, 0x000F),   # Null bytes and C0 controls
+    (0xFE00, 0xFE0F),   # Variation selectors
+    (0xE0000, 0xE007F), # Unicode Tags
+]
 
 @dataclass
 class ClassifierResult:
@@ -123,10 +148,14 @@ def _strip_zero_width(text: str) -> tuple[str, bool]:
     cleaned = []
     for ch in text:
         cp = ord(ch)
-        if ch in ZERO_WIDTH_CHARS or (UNICODE_TAGS_RANGE[0] <= cp <= UNICODE_TAGS_RANGE[1]):
+        if ch in ZERO_WIDTH_CHARS:
             found = True
-        else:
-            cleaned.append(ch)
+            continue
+        in_range = any(lo <= cp <= hi for lo, hi in ZERO_WIDTH_RANGES)
+        if in_range:
+            found = True
+            continue
+        cleaned.append(ch)
     return ''.join(cleaned), found
 
 def _detect_zero_width(text: str) -> float:
