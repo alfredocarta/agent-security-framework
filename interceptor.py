@@ -34,6 +34,7 @@ _FASTPATH_STATS = {
     "HEURISTIC_BLOCK": 0,
     "ML_INVOKED": 0,
 }
+_STAGE3_BACKEND = os.environ.get("ASF_STAGE3_BACKEND", "llm").lower()
 
 
 def _print_fastpath_stats():
@@ -222,6 +223,12 @@ def _stage3_llm(tool_input: str):
         print(f"[STAGE 3] LLM unavailable ({e}). Failing closed.", file=sys.stderr)
         return True
 
+
+def _stage3_onnx(tool_input: str):
+    from stage3_onnx import classify_text as _onnx_classify
+
+    return _onnx_classify(tool_input)
+
 def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_fastpath=False):
     trace_id = uuid.uuid4().hex
     t0 = time.monotonic()
@@ -326,7 +333,34 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_UNCERTAIN", "DeBERTa uncertain, escalating to Stage 3",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-    print(f"[STAGE 2.5] DeBERTa uncertain, escalating to Stage 3 LLM.", file=__import__("sys").stderr)
+    print(f"[STAGE 2.5] DeBERTa uncertain, escalating to Stage 3 {_STAGE3_BACKEND.upper()}.", file=__import__("sys").stderr)
+
+    if _STAGE3_BACKEND == "onnx":
+        AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "ONNX Prompt Guard analysis",
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                          metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+        try:
+            onnx_result = _stage3_onnx(tool_input)
+            print(f"[STAGE 3 ONNX] Verdict: {onnx_result}", file=sys.stderr)
+            if onnx_result == "DANGEROUS":
+                AUDITOR.log_event(agent_id, tool_name, "BLOCKED", "Stage 3 ONNX Prompt Guard: dangerous",
+                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                                  metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+                return "DENY", "BLOCKED by Stage 3 ONNX (Prompt Guard)"
+            if onnx_result == "SAFE":
+                AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 3 ONNX Prompt Guard cleared - safe input",
+                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                                  metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+                return "ALLOW", "Authorized (Stage 3 ONNX cleared)"
+            AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Stage 3 ONNX uncertain - fail closed ({onnx_result})",
+                              trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                              metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+            return "DENY", "Stage 3 ONNX uncertain - fail closed"
+        except Exception as e:
+            AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Stage 3 ONNX error - fail closed: {e}",
+                              trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                              metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+            return "DENY", f"Stage 3 ONNX error - fail closed: {e}"
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "LLM semantic analysis",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
