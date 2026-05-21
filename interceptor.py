@@ -6,10 +6,12 @@ import yaml
 import os
 import hashlib
 import sys
+import atexit
 import joblib
 from langchain_openai import ChatOpenAI
 import registry
 from audit import AUDITOR
+from hardening import _classifier_gate_score
 from stage25_deberta import classify as _stage25_classify
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +26,35 @@ _policies = _load_policies()
 _detection = _policies.get("detection", {})
 BLOCK_THRESHOLD = float(_detection.get("block_threshold", 0.85))
 PASS_THRESHOLD = float(_detection.get("pass_threshold", 0.25))
+HEURISTIC_CLEAR_THRESHOLD = float(os.environ.get("ASF_CLEAR_THRESHOLD", "0.05"))
+HEURISTIC_BLOCK_THRESHOLD = float(os.environ.get("ASF_HEURISTIC_BLOCK", "0.7"))
+_FASTPATH_ENABLED = os.environ.get("ASF_DISABLE_FASTPATH", "").lower() != "true"
+_FASTPATH_STATS = {
+    "HEURISTIC_CLEAR": 0,
+    "HEURISTIC_BLOCK": 0,
+    "ML_INVOKED": 0,
+}
+
+
+def _print_fastpath_stats():
+    if not any(_FASTPATH_STATS.values()):
+        return
+    print("Fast-path stats:", file=sys.stderr)
+    print(
+        f"  HEURISTIC_CLEAR: {_FASTPATH_STATS['HEURISTIC_CLEAR']} calls bypassed ML (benign fast-path)",
+        file=sys.stderr,
+    )
+    print(
+        f"  HEURISTIC_BLOCK: {_FASTPATH_STATS['HEURISTIC_BLOCK']} calls bypassed ML (heuristic block)",
+        file=sys.stderr,
+    )
+    print(
+        f"  ML_INVOKED: {_FASTPATH_STATS['ML_INVOKED']} calls went through ML stages",
+        file=sys.stderr,
+    )
+
+
+atexit.register(_print_fastpath_stats)
 
 def _build_llm():
     cfg = _policies.get("llm", {})
@@ -118,6 +149,42 @@ def _stage2_classifier(tool_input: str):
         return "SAFE", 1 - dangerous_proba
     return "UNCERTAIN", dangerous_proba
 
+
+def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, session_id=None):
+    if not _FASTPATH_ENABLED:
+        return None
+
+    heuristic_score = _classifier_gate_score(tool_input)
+
+    if heuristic_score >= HEURISTIC_BLOCK_THRESHOLD:
+        _FASTPATH_STATS["HEURISTIC_BLOCK"] += 1
+        AUDITOR.log_event(
+            agent_id,
+            tool_name,
+            "HEURISTIC_BLOCK",
+            f"Blocked by heuristic fast-path (score={heuristic_score:.2f})",
+            trace_id=trace_id,
+            latency_ms=latency_ms(),
+            session_id=session_id,
+        )
+        return "DENY", f"BLOCKED by heuristic (score={heuristic_score:.2f})"
+
+    if heuristic_score <= HEURISTIC_CLEAR_THRESHOLD:
+        _FASTPATH_STATS["HEURISTIC_CLEAR"] += 1
+        AUDITOR.log_event(
+            agent_id,
+            tool_name,
+            "HEURISTIC_CLEAR",
+            f"Cleared by heuristic fast-path (score={heuristic_score:.2f})",
+            trace_id=trace_id,
+            latency_ms=latency_ms(),
+            session_id=session_id,
+        )
+        return "ALLOW", f"Cleared by heuristic (score={heuristic_score:.2f})"
+
+    _FASTPATH_STATS["ML_INVOKED"] += 1
+    return None
+
 def _stage3_llm(tool_input: str):
     if os.environ.get("ASF_SKIP_LLM", "").lower() == "true":
         print("[STAGE 3] ASF_SKIP_LLM=true, failing closed.", file=sys.stderr)
@@ -155,7 +222,7 @@ def _stage3_llm(tool_input: str):
         print(f"[STAGE 3] LLM unavailable ({e}). Failing closed.", file=sys.stderr)
         return True
 
-def security_interceptor(agent_id, tool_name, tool_input, session_id=None):
+def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_fastpath=False):
     trace_id = uuid.uuid4().hex
     t0 = time.monotonic()
 
@@ -176,6 +243,13 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None):
         AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Tool '{tool_name}' not in permissions: {allowed_tools}",
                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "DENY", f"ACCESS DENIED: '{tool_name}' not authorized for {agent_id}."
+
+    if use_fastpath:
+        fastpath_result = _heuristic_fastpath(
+            agent_id, tool_name, tool_input, trace_id, _ms, session_id=session_id
+        )
+        if fastpath_result is not None:
+            return fastpath_result
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_1_START", "Regex pattern analysis",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
@@ -278,10 +352,17 @@ def hardened_interceptor(agent_id, tool_name, tool_input, session_id=None):
     """
     from hardening import apply_l1_5_hardening
     if session_id is None:
-        return apply_l1_5_hardening(agent_id, tool_name, tool_input, security_interceptor)
+        return apply_l1_5_hardening(
+            agent_id,
+            tool_name,
+            tool_input,
+            lambda a, t, i: security_interceptor(a, t, i, use_fastpath=True),
+        )
     return apply_l1_5_hardening(
         agent_id,
         tool_name,
         tool_input,
-        lambda a, t, i: security_interceptor(a, t, i, session_id=session_id),
+        lambda a, t, i: security_interceptor(
+            a, t, i, session_id=session_id, use_fastpath=True
+        ),
     )

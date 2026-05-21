@@ -55,6 +55,12 @@ _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:send|forward|redirect)\s+(?:all|the|every)'),
     re.compile(r'(?:execute|run|eval)\s+(?:the|this|following)'),
 )
+_RE_SENSITIVE_FILE_ABUSE = (
+    re.compile(r'\bsudo\b.*\b(?:cat|less|more|open|read)\b.*(?:/etc/shadow|/etc/passwd|ssh|id_rsa)', re.IGNORECASE),
+    re.compile(r'\b(?:cat|less|more|open|read)\b\s+(?:/etc/shadow|/etc/passwd|~/.ssh|/root/)', re.IGNORECASE),
+    re.compile(r'(?:/etc/shadow|/etc/passwd|id_rsa).*\b(?:curl|wget|exfiltrate|send|upload)\b', re.IGNORECASE),
+    re.compile(r'\b(?:curl|wget|exfiltrate|send|upload)\b.*(?:/etc/shadow|/etc/passwd|id_rsa)', re.IGNORECASE),
+)
 _RE_HEX_STRIP_PREFIX_AND_SPACE = re.compile(r"0x|\s")
 _RE_ENCODING_REQUEST = re.compile(
     r'\b(?:decode|decoded|encoded|what\s+does\s+this\s+mean)\b',
@@ -109,7 +115,7 @@ _FEATURE_WEIGHTS = {
     "base64": 0.20, "rot13": 0.15, "structural": 0.20,
     "unicode": 0.15, "known_payloads": 0.25,
     "instruction_lang": 0.15, "entropy": 0.10,
-    "zero_width": 1.0,
+    "sensitive_file_abuse": 0.25, "zero_width": 1.0,
 }
 
 def _strip_zero_width(text: str) -> tuple[str, bool]:
@@ -238,6 +244,9 @@ def _detect_instruction_language(text):
     text_lower = text.lower()
     return min(sum(1 for pattern in _RE_INSTRUCTION_LANGUAGE if pattern.search(text_lower)) * 0.3, 1.0)
 
+def _detect_sensitive_file_abuse(text):
+    return 1.0 if any(pattern.search(text) for pattern in _RE_SENSITIVE_FILE_ABUSE) else 0.0
+
 def _compute_entropy(text):
     if not text: return 0.0
     freq = {}
@@ -256,6 +265,7 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         'unicode': _detect_unicode_anomalies(text),
         'known_payloads': _detect_known_payloads(text),
         'instruction_lang': _detect_instruction_language(text),
+        'sensitive_file_abuse': _detect_sensitive_file_abuse(text),
         'entropy': _compute_entropy(text),
         'zero_width': _detect_zero_width(text),
     }
