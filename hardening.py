@@ -376,7 +376,7 @@ def _try_decode_all(text: str) -> tuple[str, bool]:
             return decoded, True
     return text, False
 
-def _decode_recursive(text: str, max_depth: int = 3) -> tuple[str, int]:
+def _decode_recursive(text: str, max_depth: int = 5) -> tuple[str, int]:
     current = text
     decoded_depth = 0
     for depth in range(1, max_depth + 1):
@@ -417,7 +417,7 @@ def decode_and_rescan(tool_input, stage1_regex_fn=None):
         return embedded_decoded, 0.3
 
     current = tool_input
-    for depth in range(1, 4):
+    for depth in range(1, 6):
         decoded, changed = _try_decode_all(current)
         if not changed:
             break
