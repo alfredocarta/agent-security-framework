@@ -10,12 +10,87 @@ import atexit
 import joblib
 from langchain_openai import ChatOpenAI
 import registry
-from audit import AUDITOR
+from audit import AUDITOR as _ASF_AUDITOR
 from hardening import _classifier_gate_score
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
 CLASSIFIER_PATH = os.path.join(BASE_DIR, "classifier.pkl")
+
+
+def _select_auditor():
+    if os.environ.get("ASF_AGT_AUDIT", "").lower() != "true":
+        return _ASF_AUDITOR
+
+    try:
+        from agt_audit_bridge import AGTAuditBridge
+
+        print("[AUDIT] ASF_AGT_AUDIT=true, using AGT audit bridge", file=sys.stderr)
+        return AGTAuditBridge(mirror_asf=False)
+    except Exception as exc:
+        print(f"[AUDIT] AGT audit bridge unavailable, using ASF auditor: {exc}", file=sys.stderr)
+        return _ASF_AUDITOR
+
+
+AUDITOR = _select_auditor()
+_AGT_HITL_BRIDGE = None
+_AGT_HITL_INIT_ATTEMPTED = False
+
+
+def _agt_hitl_enabled():
+    return os.environ.get("ASF_AGT_HITL", "").lower() == "true"
+
+
+def _get_agt_hitl_bridge():
+    global _AGT_HITL_BRIDGE, _AGT_HITL_INIT_ATTEMPTED
+    if not _agt_hitl_enabled():
+        return None
+    if _AGT_HITL_INIT_ATTEMPTED:
+        return _AGT_HITL_BRIDGE
+
+    _AGT_HITL_INIT_ATTEMPTED = True
+    try:
+        from agt_hitl_bridge import AGTHITLBridge
+
+        _AGT_HITL_BRIDGE = AGTHITLBridge(
+            required_approvals=int(os.environ.get("ASF_AGT_HITL_APPROVALS", "1")),
+            timeout_seconds=int(os.environ.get("ASF_AGT_HITL_TIMEOUT", "300")),
+        )
+        print("[HITL] ASF_AGT_HITL=true, using AGT HITL bridge", file=sys.stderr)
+    except Exception as exc:
+        _AGT_HITL_BRIDGE = None
+        print(f"[HITL] AGT HITL bridge unavailable, using ASF HITL behavior: {exc}", file=sys.stderr)
+    return _AGT_HITL_BRIDGE
+
+
+def _request_agt_hitl(trace_id, agent_id, tool_name, reason, latency_ms, session_id=None):
+    bridge = _get_agt_hitl_bridge()
+    if bridge is None:
+        return None
+
+    try:
+        request_id = bridge.request_approval(trace_id, agent_id, tool_name, reason)
+        status = bridge.check_approval(request_id)
+        AUDITOR.log_event(
+            agent_id,
+            tool_name,
+            "AGT_HITL_REQUESTED",
+            f"AGT HITL quorum request {request_id} status={status}",
+            trace_id=trace_id,
+            latency_ms=latency_ms(),
+            session_id=session_id,
+            metadata={
+                "agt_hitl_request_id": request_id,
+                "agt_hitl_status": status,
+                "agt_required_approvals": getattr(bridge, "required_approvals", None),
+                "agt_available": getattr(bridge, "agt_available", False),
+                "agt_error": getattr(bridge, "agt_error", None),
+            },
+        )
+        return request_id, status
+    except Exception as exc:
+        print(f"[HITL] AGT HITL request failed, using ASF HITL behavior: {exc}", file=sys.stderr)
+        return None
 
 def _load_policies():
     with open(POLICIES_PATH, "r") as f:
@@ -386,9 +461,24 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
                       metadata={"model": "gemma2:2b", "provider": "ollama"})
     if _stage3_llm(tool_input):
+        agt_hitl = _request_agt_hitl(
+            trace_id,
+            agent_id,
+            tool_name,
+            "Stage 3 LLM flagged as dangerous",
+            _ms,
+            session_id=session_id,
+        )
+        metadata = {"model": "gemma2:2b", "provider": "ollama"}
+        if agt_hitl is not None:
+            request_id, status = agt_hitl
+            metadata.update({
+                "agt_hitl_request_id": request_id,
+                "agt_hitl_status": status,
+            })
         AUDITOR.log_event(agent_id, tool_name, "HITL_REQUESTED", "Stage 3 LLM flagged as dangerous",
                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                          metadata={"model": "gemma2:2b", "provider": "ollama"})
+                          metadata=metadata)
         return "HITL", "Action paused for HUMAN APPROVAL (flagged by Stage 3 LLM)."
 
     AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 3 LLM cleared - safe input",
