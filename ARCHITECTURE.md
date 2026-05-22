@@ -45,48 +45,114 @@ model loaded on host
 Ollama also runs on the host at `localhost:11434` and serves `gemma2:2b` for
 Stage 3.
 
-## Stage 2.5b ensemble gate
+## Detection Pipeline
 
-Stage 2.5b is an optional injection-specialist gate that runs only when the
-Stage 2 TF-IDF classifier is uncertain and Stage 2.5a DeBERTa also returns
-`UNCERTAIN`. This keeps the common fast path unchanged while allowing a second
-model to catch prompt-injection-specific misses before Stage 3.
+```text
+hardened_interceptor(agent_id, tool_name, tool_input)
 
-Current behavior:
+┌─────────────────────────────────────────────────────────┐
+│ L1.5 Hardening (hardening.py)                          │
+│  0.  NFKC normalization                                │
+│  0b. Zero-width character stripping (40+ chars)        │
+│  0c. HTML/CSS hidden text detection                    │
+│  1.  Heuristic fast-path                               │
+│      score >= 0.7  → HEURISTIC_BLOCK (skip all ML)     │
+│      score <= 0.05 → HEURISTIC_CLEAR (skip all ML)     │
+│  2.  Classifier gate (critical >= 0.7)                 │
+│  3.  decode_and_rescan (Base64/hex/ROT13, depth 5)     │
+│  4.  Spotlight + canary                                │
+│  5.  Cross-field correlation (threshold 0.65)          │
+└──────────────────────┬──────────────────────────────────┘
+                       │ UNCERTAIN (5-10% of calls)
+┌──────────────────────▼──────────────────────────────────┐
+│ Stage 1: Regex kill-switches (pre-compiled)             │
+└──────────────────────┬──────────────────────────────────┘
+                       │ PASS
+┌──────────────────────▼──────────────────────────────────┐
+│ Stage 2: TF-IDF + Random Forest                        │
+│   BLOCK >= 0.85 → DENY                                  │
+│   SAFE  <= 0.25 → ALLOW                                 │
+│   UNCERTAIN     → Stage 2.5                             │
+└──────────────────────┬──────────────────────────────────┘
+                       │ UNCERTAIN
+┌──────────────────────▼──────────────────────────────────┐
+│ Stage 2.5a: DeBERTa-v3-base-injection                  │
+│   DANGEROUS → DENY (immediate)                         │
+│   SAFE      → ALLOW (immediate)                        │
+│   UNCERTAIN → Stage 2.5b                               │
+└──────────────────────┬──────────────────────────────────┘
+                       │ UNCERTAIN only
+┌──────────────────────▼──────────────────────────────────┐
+│ Stage 2.5b: ProtectAI DeBERTa v2 (injection specialist)│
+│   DANGEROUS → DENY                                     │
+│   SAFE/UNCERTAIN → Stage 3                             │
+│   UNAVAILABLE → Stage 3 (skip silently)                │
+│   Controlled by: ASF_DISABLE_STAGE25B=true             │
+└──────────────────────┬──────────────────────────────────┘
+                       │ UNCERTAIN
+┌──────────────────────▼──────────────────────────────────┐
+│ Stage 3: LLM or ONNX (ASF_STAGE3_BACKEND=llm|onnx)    │
+│   LLM:  Gemma 2B via Ollama (lazy init, fail-closed)   │
+│   ONNX: Prompt Guard 86M (gravitee-io, 38ms, no auth)  │
+│   UNCERTAIN → fail-closed (DENY)                       │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────┐
+│ Output Guard (output_guard.py)                         │
+└─────────────────────────────────────────────────────────┘
+```
 
-- primary candidate: `meta-llama/Llama-Prompt-Guard-2-86M`
-- local availability: HuggingFace reports the model as manually gated, and the
-  unauthenticated environment cannot download it
-- fallback candidate: `ProtectAI/deberta-v3-base-prompt-injection-v2`
-- runtime contract: returns `DANGEROUS`, `SAFE`, `UNCERTAIN`, or `UNAVAILABLE`
-- fail behavior: returns `UNAVAILABLE` and is skipped if loading or inference
-  fails
-- disable flag: `ASF_DISABLE_STAGE25B=true`
+## Environment variables
 
-Ensemble logic:
+| Variable | Default | Description |
+|---|---|---|
+| ASF_SKIP_LLM | false | Skip Stage 3 LLM entirely |
+| ASF_ALWAYS_LLM | false | Force Stage 3 on every call |
+| ASF_DISABLE_STAGE25 | false | Disable Stage 2.5a DeBERTa |
+| ASF_DISABLE_STAGE25B | false | Disable Stage 2.5b Prompt Guard |
+| ASF_DISABLE_L15 | false | Disable L1.5 hardening |
+| ASF_DISABLE_FASTPATH | false | Disable heuristic fast-path |
+| ASF_CLEAR_THRESHOLD | 0.05 | Heuristic score below which to CLEAR |
+| ASF_HEURISTIC_BLOCK | 0.7 | Heuristic score above which to BLOCK |
+| ASF_STAGE3_BACKEND | llm | Stage 3 backend: llm or onnx |
+| OLLAMA_BASE_URL | http://localhost:11434/v1 | Ollama endpoint |
 
-- Stage 2.5a `DANGEROUS`: block immediately
-- Stage 2.5a `SAFE`: allow without Stage 2.5b
-- Stage 2.5a `UNCERTAIN`: run Stage 2.5b
-- Stage 2.5b `DANGEROUS`: block
-- Stage 2.5b `SAFE`, `UNCERTAIN`, or `UNAVAILABLE`: continue to Stage 3
+## Performance
 
-## Why DeBERTa runs on the host today
+Latency (per tool call, smolagents integration):
 
-DeBERTa is loaded through HuggingFace Transformers in the same Python process as
-the interceptor. Keeping it on the host gives the current evaluation harness:
+```text
+With fast-path (default): 14ms average
+Without fast-path:        61ms average
+Improvement:              77% latency reduction
+```
 
-- direct access to the local HuggingFace model cache
-- no network hop between Stage 2 and Stage 2.5
-- low-latency in-process inference after warm-up
-- simpler dependency management for the conda-based evaluation workflow
+Stage breakdown (when ML is invoked):
+
+```text
+L1.5 hardening:     <1ms
+Stage 1 regex:      <1ms
+Stage 2 TF-IDF:     6ms
+Stage 2.5a DeBERTa: 57ms
+Stage 2.5b Prompt Guard: 55ms (only on 2.5a UNCERTAIN)
+Stage 3 Gemma 2B:   ~300ms (only on UNCERTAIN)
+Stage 3 ONNX:       38ms   (only on UNCERTAIN)
+```
+
+External benchmark (deepset/prompt-injections, 546 samples):
+
+```text
+ASF full pipeline:     recall 13.3%, FPR 1.2%, F1 0.222
+ONNX Prompt Guard 86M: recall 23.6%, FPR 0.3%, F1 0.381
+Sigil heuristic (peer): recall 21.3%, FPR 0.0%, F1 0.351
+```
 
 ## Production recommendation
 
-For production containerization, Stage 2.5 should be extracted into a small
-FastAPI microservice with a `/classify` endpoint. The ASF interceptor can call
-that service with the normalized tool input and receive one of `SAFE`,
-`DANGEROUS`, or `UNCERTAIN`.
+For production containerization, Stage 2.5 should be extracted into small
+FastAPI microservices with `/classify` endpoints. The ASF interceptor can call
+those services with the normalized tool input and receive one of `SAFE`,
+`DANGEROUS`, `UNCERTAIN`, or `UNAVAILABLE`.
 
 Recommended deployment shape:
 
@@ -94,10 +160,10 @@ Recommended deployment shape:
 - `stage25-deberta`: FastAPI service loading the HuggingFace model once at
   container startup
 - `stage25b-promptguard`: optional FastAPI service for the Prompt Guard-style
-  injection specialist once the preferred model is accessible
-- `ollama` or managed LLM endpoint: Stage 3 fallback
+  injection specialist
+- `ollama` or `stage3-onnx`: Stage 3 fallback
 - `langfuse` + `postgres`: observability stack
 
-This preserves low cold-start impact by warming DeBERTa inside its own long-lived
-container, makes resource allocation explicit, and isolates ML dependencies from
-the application runtime.
+This preserves low cold-start impact by warming classifier models inside their
+own long-lived containers, makes resource allocation explicit, and isolates ML
+dependencies from the application runtime.
