@@ -12,7 +12,6 @@ from langchain_openai import ChatOpenAI
 import registry
 from audit import AUDITOR
 from hardening import _classifier_gate_score
-from stage25_deberta import classify as _stage25_classify
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
@@ -298,38 +297,59 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                       trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
     print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
 
-    # Stage 2.5: DeBERTa fast gate
-    AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_START", "DeBERTa fast gate",
-                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-    stage25_verdict = _stage25_classify(tool_input)
-    print(f"[STAGE 2.5] DeBERTa verdict: {stage25_verdict}", file=__import__("sys").stderr)
-    if stage25_verdict == "DANGEROUS":
-        registry.suspend_agent(agent_id)
-        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 2.5 DeBERTa: dangerous",
-                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-        return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)."
-    if stage25_verdict == "SAFE":
-        AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 2.5 DeBERTa: safe",
-                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-        return "ALLOW", "Authorized (Stage 2.5 DeBERTa cleared)."
-
-    if os.environ.get("ASF_DISABLE_STAGE25B", "").lower() != "true":
+    # Stage 2.5a: DeBERTa fast gate. Stage 2.5b is strictly conditional on
+    # DeBERTa returning UNCERTAIN.
+    if os.environ.get("ASF_DISABLE_STAGE25", "").lower() != "true":
         try:
-            AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5B_START", "Prompt Guard injection gate",
+            AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_START", "DeBERTa fast gate",
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-            from stage25b_promptguard import classify_text as _stage25b_classify
-            stage25b_verdict = _stage25b_classify(tool_input)
-            print(f"[STAGE 2.5b] Prompt Guard verdict: {stage25b_verdict}", file=sys.stderr)
-            if stage25b_verdict == "DANGEROUS":
+            from stage25_deberta import classify_text as _stage25_classify
+            stage25_verdict = _stage25_classify(tool_input)
+            AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5A_VERDICT",
+                              f"DeBERTa verdict: {stage25_verdict}",
+                              trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+            print(f"[STAGE 2.5] DeBERTa verdict: {stage25_verdict}", file=sys.stderr)
+
+            if stage25_verdict == "DANGEROUS":
                 registry.suspend_agent(agent_id)
-                AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 2.5b Prompt Guard: dangerous",
+                AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
+                                  "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)",
                                   trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-                return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)."
-            if stage25b_verdict == "UNAVAILABLE":
-                AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5B_UNAVAILABLE", "Prompt Guard unavailable",
+                return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)."
+
+            if stage25_verdict == "SAFE":
+                AUDITOR.log_event(agent_id, tool_name, "ALLOWED",
+                                  "Authorized (Stage 2.5 DeBERTa cleared)",
                                   trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                return "ALLOW", "Authorized (Stage 2.5 DeBERTa cleared)."
+
+            if os.environ.get("ASF_DISABLE_STAGE25B", "").lower() != "true":
+                try:
+                    AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5B_START",
+                                      "Prompt Guard injection gate",
+                                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                    from stage25b_promptguard import classify_text as _stage25b_classify
+                    stage25b_verdict = _stage25b_classify(tool_input)
+                    AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5B_VERDICT",
+                                      f"Prompt Guard verdict: {stage25b_verdict}",
+                                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                    print(f"[STAGE 2.5b] Prompt Guard verdict: {stage25b_verdict}", file=sys.stderr)
+
+                    if stage25b_verdict == "DANGEROUS":
+                        registry.suspend_agent(agent_id)
+                        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
+                                          "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)",
+                                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                        return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)."
+
+                    if stage25b_verdict == "UNAVAILABLE":
+                        AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5B_UNAVAILABLE",
+                                          "Prompt Guard unavailable",
+                                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                except Exception:
+                    pass
         except Exception as exc:
-            print(f"[STAGE 2.5b] Skipped due to error: {exc}", file=sys.stderr)
+            print(f"[STAGE 2.5] DeBERTa error: {exc}", file=sys.stderr)
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_UNCERTAIN", "DeBERTa uncertain, escalating to Stage 3",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
