@@ -12,8 +12,8 @@ Exit 0 = allow, exit 2 = block (stdout shown to Claude Code as reason).
 
 Env:
   ASF_HOOK_FAIL_CLOSED=true        block on daemon errors instead of allow
-  ASF_HOOK_RETRIES=2               connection retry count (default 2)
-  ASF_HOOK_STARTUP_TIMEOUT=10      seconds to wait for daemon to start
+  ASF_HOOK_RETRIES=2               connection retry count (default 2, 0-10)
+  ASF_HOOK_STARTUP_TIMEOUT=10      seconds to wait for daemon to start (1-60)
 """
 
 import sys
@@ -40,13 +40,9 @@ WATCHED_FILES   = [
 ]
 PYTHON          = "/Users/alfredo/miniconda3/envs/eval-framework/bin/python"
 TIMEOUT         = 1.0
-RETRIES         = int(os.environ.get("ASF_HOOK_RETRIES", "2"))
-STARTUP_TIMEOUT = float(os.environ.get("ASF_HOOK_STARTUP_TIMEOUT", "10"))
-FAIL_CLOSED     = os.environ.get("ASF_HOOK_FAIL_CLOSED", "false").lower() == "true"
 MAX_STDIN_BYTES = 256 * 1024
 
 # macOS LOCAL_PEERPID constants (SOL_LOCAL=0, LOCAL_PEERPID=2).
-# getsockopt returns -1 on failure; callers treat -1 as unknown and fall back.
 _SOL_LOCAL      = 0
 _LOCAL_PEERPID  = 2
 
@@ -55,12 +51,33 @@ TOOL_MAP = {
 }
 
 # Parsed passthrough: single command, no shell metacharacters, no substitution.
-# ps/pgrep excluded: wide flag variants (eww, auxww) expose env vars with tokens.
+# ps/pgrep excluded: wide flag variants expose env vars with tokens.
 _SAFE_PASSTHROUGH_CMDS = {
     "ls", "cd", "pwd",
     "which", "type", "df",
 }
 _SHELL_META = re.compile(r"[;&|`$<>\n\r()]")
+
+
+def _int_env(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return min(max(int(os.environ.get(name, str(default))), lo), hi)
+    except ValueError:
+        print(f"[ASF DENY] invalid env: {name}", flush=True)
+        sys.exit(2)
+
+
+def _float_env(name: str, default: float, lo: float, hi: float) -> float:
+    try:
+        return min(max(float(os.environ.get(name, str(default))), lo), hi)
+    except ValueError:
+        print(f"[ASF DENY] invalid env: {name}", flush=True)
+        sys.exit(2)
+
+
+RETRIES         = _int_env("ASF_HOOK_RETRIES", 2, 0, 10)
+STARTUP_TIMEOUT = _float_env("ASF_HOOK_STARTUP_TIMEOUT", 10.0, 1.0, 60.0)
+FAIL_CLOSED     = os.environ.get("ASF_HOOK_FAIL_CLOSED", "false").lower() == "true"
 
 
 def is_bash_passthrough(command: str) -> bool:
@@ -74,12 +91,27 @@ def is_bash_passthrough(command: str) -> bool:
 
 
 def _open_runtime_file(path, mode=0o600):
-    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, mode)
-    st = os.fstat(fd)
-    if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, mode)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1:
+            raise RuntimeError(f"unsafe runtime file: {path}")
+        os.ftruncate(fd, 0)
+    except Exception:
         os.close(fd)
-        raise RuntimeError(f"unsafe runtime file: {path}")
+        raise
     return os.fdopen(fd, "w")
+
+
+def _read_runtime_pid() -> int:
+    fd = os.open(PID_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 16:
+            raise RuntimeError(f"unsafe pid file: {PID_FILE}")
+        return int(os.read(fd, 16).decode().strip())
+    finally:
+        os.close(fd)
 
 
 def _get_unix_peer_pid(sock) -> int:
@@ -112,7 +144,6 @@ def _daemon_trusted(pid: int) -> bool:
         peer_pid = _get_unix_peer_pid(s)
         if peer_pid != -1:
             return peer_pid == pid and _pid_belongs_to_daemon(pid)
-        # Peer PID unavailable on this platform; fall back to process name check.
         return _pid_belongs_to_daemon(pid)
     except OSError:
         return False
@@ -133,7 +164,7 @@ def _socket_alive() -> bool:
 
 def _stop_daemon():
     try:
-        pid = int(open(PID_FILE).read().strip())
+        pid = _read_runtime_pid()
         if not _pid_belongs_to_daemon(pid):
             return
         import signal as _sig
@@ -148,7 +179,7 @@ def _ensure_daemon_locked():
         trusted = False
         if os.path.exists(PID_FILE):
             try:
-                pid = int(open(PID_FILE).read().strip())
+                pid = _read_runtime_pid()
                 trusted = _daemon_trusted(pid)
             except Exception:
                 trusted = False
@@ -176,7 +207,7 @@ def _ensure_daemon_locked():
     # A daemon may already be starting (PID written but socket not bound yet).
     if not os.path.exists(SOCKET_PATH) and os.path.exists(PID_FILE):
         try:
-            pid = int(open(PID_FILE).read().strip())
+            pid = _read_runtime_pid()
             if _pid_belongs_to_daemon(pid):
                 deadline = time.monotonic() + STARTUP_TIMEOUT
                 while time.monotonic() < deadline:
@@ -215,6 +246,14 @@ def query_daemon(asf_tool, text):
     try:
         sock.settimeout(TIMEOUT)
         sock.connect(SOCKET_PATH)
+        peer_pid = _get_unix_peer_pid(sock)
+        if peer_pid != -1:
+            try:
+                expected_pid = _read_runtime_pid()
+            except Exception as e:
+                raise RuntimeError(f"pid read failed after connect: {e}")
+            if peer_pid != expected_pid:
+                raise RuntimeError(f"socket peer PID mismatch: {peer_pid} != {expected_pid}")
         req = json.dumps({"tool": asf_tool, "input": text}) + "\n"
         sock.sendall(req.encode())
         while True:
@@ -254,8 +293,16 @@ def main():
         print("[ASF DENY] invalid hook request", flush=True)
         sys.exit(2)
 
+    if not isinstance(payload, dict):
+        print("[ASF DENY] invalid hook request", flush=True)
+        sys.exit(2)
+
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {})
+
+    if not isinstance(tool_input, dict):
+        print("[ASF DENY] invalid hook request", flush=True)
+        sys.exit(2)
 
     if tool_name not in TOOL_MAP:
         sys.exit(2 if FAIL_CLOSED else 0)

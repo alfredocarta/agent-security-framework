@@ -46,12 +46,27 @@ _server = None
 
 
 def _open_runtime_file(path, mode=0o600):
-    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, mode)
-    st = os.fstat(fd)
-    if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, mode)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1:
+            raise RuntimeError(f"unsafe runtime file: {path}")
+        os.ftruncate(fd, 0)
+    except Exception:
         os.close(fd)
-        raise RuntimeError(f"unsafe runtime file: {path}")
+        raise
     return os.fdopen(fd, "w")
+
+
+def _read_runtime_pid() -> int:
+    fd = os.open(PID_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 16:
+            raise RuntimeError(f"unsafe pid file: {PID_FILE}")
+        return int(os.read(fd, 16).decode().strip())
+    finally:
+        os.close(fd)
 
 import registry
 from interceptor import hardened_interceptor
@@ -123,7 +138,7 @@ def cleanup(signum=None, frame=None):
         except OSError:
             pass
     try:
-        owns_pid = int(open(PID_FILE).read().strip()) == os.getpid()
+        owns_pid = _read_runtime_pid() == os.getpid()
     except Exception:
         owns_pid = False
     if owns_pid:
