@@ -142,9 +142,9 @@ def _daemon_trusted(pid: int) -> bool:
         s.settimeout(0.2)
         s.connect(SOCKET_PATH)
         peer_pid = _get_unix_peer_pid(s)
-        if peer_pid != -1:
-            return peer_pid == pid and _pid_belongs_to_daemon(pid)
-        return _pid_belongs_to_daemon(pid)
+        if peer_pid == -1:
+            return False
+        return peer_pid == pid and _pid_belongs_to_daemon(pid)
     except OSError:
         return False
     finally:
@@ -247,13 +247,16 @@ def query_daemon(asf_tool, text):
         sock.settimeout(TIMEOUT)
         sock.connect(SOCKET_PATH)
         peer_pid = _get_unix_peer_pid(sock)
-        if peer_pid != -1:
-            try:
-                expected_pid = _read_runtime_pid()
-            except Exception as e:
-                raise RuntimeError(f"pid read failed after connect: {e}")
-            if peer_pid != expected_pid:
-                raise RuntimeError(f"socket peer PID mismatch: {peer_pid} != {expected_pid}")
+        if peer_pid == -1:
+            raise RuntimeError("socket peer PID unavailable")
+        try:
+            expected_pid = _read_runtime_pid()
+        except Exception as e:
+            raise RuntimeError(f"pid read failed after connect: {e}")
+        if peer_pid != expected_pid:
+            raise RuntimeError(f"socket peer PID mismatch: {peer_pid} != {expected_pid}")
+        if not _pid_belongs_to_daemon(expected_pid):
+            raise RuntimeError(f"socket peer is not trusted daemon: {expected_pid}")
         req = json.dumps({"tool": asf_tool, "input": text}) + "\n"
         sock.sendall(req.encode())
         while True:

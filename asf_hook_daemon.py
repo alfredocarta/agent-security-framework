@@ -125,8 +125,7 @@ def handle_client(conn):
         resp = json.dumps({"verdict": verdict, "reason": reason}) + "\n"
         conn.sendall(resp.encode())
     except Exception as e:
-        verdict = "DENY" if FAIL_CLOSED else "ALLOW"
-        resp = json.dumps({"verdict": verdict, "reason": f"daemon error: {e}"}) + "\n"
+        resp = json.dumps({"verdict": "DENY", "reason": f"daemon error: {e}"}) + "\n"
         try:
             conn.sendall(resp.encode())
         except Exception:
