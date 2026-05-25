@@ -7,8 +7,8 @@ The lightweight asf_hook.py client connects per tool call - no Python
 startup cost, no model reload.
 
 Start:   python asf_hook_daemon.py &
-Socket:  /tmp/asf_hook.sock
-Stop:    kill $(cat /tmp/asf_hook.pid)
+Socket:  ~/.cache/asf-hook/asf_hook.sock
+Stop:    kill $(cat ~/.cache/asf-hook/asf_hook.pid)
 
 Env:
   ASF_HOOK_FAIL_CLOSED=true   DENY on daemon errors instead of ALLOW
@@ -23,8 +23,10 @@ import signal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-SOCKET_PATH = "/tmp/asf_hook.sock"
-PID_FILE    = "/tmp/asf_hook.pid"
+RUNTIME_DIR = os.path.expanduser("~/.cache/asf-hook")
+os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+SOCKET_PATH = os.path.join(RUNTIME_DIR, "asf_hook.sock")
+PID_FILE    = os.path.join(RUNTIME_DIR, "asf_hook.pid")
 AGENT_ID    = "claude-code-agent"
 
 MAX_REQUEST_BYTES  = 64 * 1024
@@ -63,7 +65,13 @@ def handle_client(conn):
             if b"\n" in data:
                 break
 
-        req = json.loads(data.decode().strip())
+        try:
+            req = json.loads(data.decode().strip())
+        except Exception as e:
+            resp = json.dumps({"verdict": "DENY", "reason": f"invalid hook request: {e}"}) + "\n"
+            conn.sendall(resp.encode())
+            return
+
         asf_tool = req.get("tool", "shell")
         text = req.get("input", "")
 
@@ -123,6 +131,13 @@ def main():
         try:
             conn, _ = server.accept()
             if not _client_slots.acquire(blocking=False):
+                verdict = "DENY" if FAIL_CLOSED else "ALLOW"
+                try:
+                    conn.sendall(
+                        (json.dumps({"verdict": verdict, "reason": "daemon overloaded"}) + "\n").encode()
+                    )
+                except OSError:
+                    pass
                 conn.close()
                 continue
             t = threading.Thread(target=handle_client, args=(conn,), daemon=True)

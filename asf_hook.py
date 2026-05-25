@@ -5,7 +5,7 @@ ASF PreToolUse hook for Claude Code.
 Registered in ~/.claude/settings.json under hooks.PreToolUse.
 Claude Code calls this script before every matched Bash execution.
 
-Connects to asf_hook_daemon on /tmp/asf_hook.sock. If the daemon is not
+Connects to asf_hook_daemon on SOCKET_PATH. If the daemon is not
 running, starts it automatically (first call pays startup cost).
 
 Exit 0 = allow, exit 2 = block (stdout shown to Claude Code as reason).
@@ -20,12 +20,17 @@ import sys
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import time
+import fcntl
 
-SOCKET_PATH     = "/tmp/asf_hook.sock"
-PID_FILE        = "/tmp/asf_hook.pid"
+RUNTIME_DIR     = os.path.expanduser("~/.cache/asf-hook")
+os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+SOCKET_PATH     = os.path.join(RUNTIME_DIR, "asf_hook.sock")
+PID_FILE        = os.path.join(RUNTIME_DIR, "asf_hook.pid")
+LOCK_FILE       = os.path.join(RUNTIME_DIR, "asf_hook.lock")
 DAEMON_SCRIPT   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asf_hook_daemon.py")
 WATCHED_FILES   = [
     DAEMON_SCRIPT,
@@ -43,16 +48,40 @@ TOOL_MAP = {
     "Bash": ("shell", lambda i: i.get("command", "")),
 }
 
-# Narrow passthrough: only unambiguously read-only or process-inspection ops.
-# Execution tools (python, conda, pip, git, rm, curl, chmod, etc.) go through ASF.
-_BASH_PASSTHROUGH = re.compile(
-    r"^\s*(ls|cd|pwd|wc|head|tail|ps|pgrep|which|type|stat|df|du)\b"
-)
+# Parsed passthrough: single command, no shell metacharacters, no substitution.
+_SAFE_PASSTHROUGH_CMDS = {
+    "ls", "cd", "pwd", "wc", "head", "tail", "ps", "pgrep",
+    "which", "type", "stat", "df", "du",
+}
+_SHELL_META = re.compile(r"[;&|`$<>\n\r()]")
+
+
+def is_bash_passthrough(command: str) -> bool:
+    if _SHELL_META.search(command):
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(parts) and parts[0] in _SAFE_PASSTHROUGH_CMDS
+
+
+def _pid_belongs_to_daemon(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=2,
+        )
+        return "asf_hook_daemon" in result.stdout
+    except Exception:
+        return False
 
 
 def _stop_daemon():
     try:
         pid = int(open(PID_FILE).read().strip())
+        if not _pid_belongs_to_daemon(pid):
+            return
         import signal as _sig
         os.kill(pid, _sig.SIGTERM)
         time.sleep(0.3)
@@ -60,14 +89,31 @@ def _stop_daemon():
         pass
 
 
-def ensure_daemon():
-    if os.path.exists(SOCKET_PATH) and os.path.exists(PID_FILE):
-        sock_mtime = os.path.getmtime(SOCKET_PATH)
-        if any(
-            os.path.exists(p) and os.path.getmtime(p) > sock_mtime
-            for p in WATCHED_FILES
-        ):
-            _stop_daemon()
+def _socket_alive() -> bool:
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        s.connect(SOCKET_PATH)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_daemon_locked():
+    if os.path.exists(SOCKET_PATH):
+        if not _socket_alive():
+            try:
+                os.unlink(SOCKET_PATH)
+            except FileNotFoundError:
+                pass
+        elif os.path.exists(PID_FILE):
+            sock_mtime = os.path.getmtime(SOCKET_PATH)
+            if any(
+                os.path.exists(p) and os.path.getmtime(p) > sock_mtime
+                for p in WATCHED_FILES
+            ):
+                _stop_daemon()
 
     if not os.path.exists(SOCKET_PATH):
         subprocess.Popen(
@@ -83,22 +129,30 @@ def ensure_daemon():
                 return
 
 
+def ensure_daemon():
+    with open(LOCK_FILE, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _ensure_daemon_locked()
+
+
 def query_daemon(asf_tool, text):
     ensure_daemon()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(TIMEOUT)
-    sock.connect(SOCKET_PATH)
-    req = json.dumps({"tool": asf_tool, "input": text}) + "\n"
-    sock.sendall(req.encode())
     resp = b""
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        resp += chunk
-        if b"\n" in resp:
-            break
-    sock.close()
+    try:
+        sock.settimeout(TIMEOUT)
+        sock.connect(SOCKET_PATH)
+        req = json.dumps({"tool": asf_tool, "input": text}) + "\n"
+        sock.sendall(req.encode())
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+            if b"\n" in resp:
+                break
+    finally:
+        sock.close()
     return json.loads(resp.decode().strip())
 
 
@@ -111,20 +165,20 @@ def main():
     try:
         payload = json.loads(raw)
     except Exception:
-        sys.exit(0)
+        sys.exit(2 if FAIL_CLOSED else 0)
 
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {})
 
     if tool_name not in TOOL_MAP:
-        sys.exit(0)
+        sys.exit(2 if FAIL_CLOSED else 0)
 
     asf_tool, extractor = TOOL_MAP[tool_name]
     text = extractor(tool_input)
     if not text or not text.strip():
         sys.exit(0)
 
-    if tool_name == "Bash" and _BASH_PASSTHROUGH.match(text):
+    if tool_name == "Bash" and is_bash_passthrough(text):
         sys.exit(0)
 
     last_error = None
@@ -144,6 +198,7 @@ def main():
     if FAIL_CLOSED:
         print(f"[ASF DENY] hook error: {last_error}", flush=True)
         sys.exit(2)
+    print(f"[ASF WARN] fail-open: {last_error}", file=sys.stderr, flush=True)
     sys.exit(0)
 
 
