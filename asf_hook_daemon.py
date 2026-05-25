@@ -115,6 +115,12 @@ def handle_client(conn):
         result = hardened_interceptor(AGENT_ID, asf_tool, text)
         verdict = result[0]
         reason = result[1] if len(result) > 1 else ""
+        if verdict == "HITL":
+            verdict = "DENY"
+        elif verdict not in {"ALLOW", "DENY"}:
+            invalid_verdict = verdict
+            verdict = "DENY"
+            reason = f"invalid interceptor verdict: {invalid_verdict!r}"
 
         resp = json.dumps({"verdict": verdict, "reason": reason}) + "\n"
         conn.sendall(resp.encode())
