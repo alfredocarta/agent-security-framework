@@ -130,7 +130,11 @@ def _pid_belongs_to_daemon(pid: int) -> bool:
         )
         cmd = result.stdout.strip()
         parts = shlex.split(cmd)
-        return any(os.path.realpath(p) == os.path.realpath(DAEMON_SCRIPT) for p in parts)
+        return (
+            len(parts) >= 2
+            and os.path.realpath(parts[0]) == os.path.realpath(PYTHON)
+            and os.path.realpath(parts[1]) == os.path.realpath(DAEMON_SCRIPT)
+        )
     except Exception:
         return False
 
@@ -272,13 +276,19 @@ def query_daemon(asf_tool, text):
 
 
 def _init_runtime_dir():
-    os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
-    lst = os.lstat(RUNTIME_DIR)
-    st = os.stat(RUNTIME_DIR)
-    if _stat.S_ISLNK(lst.st_mode) or not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+    try:
+        os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(RUNTIME_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
+        try:
+            st = os.fstat(fd)
+            if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+                raise RuntimeError("unsafe runtime dir")
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
+    except Exception:
         print(f"[ASF DENY] unsafe ASF hook runtime dir: {RUNTIME_DIR}", flush=True)
         sys.exit(2)
-    os.chmod(RUNTIME_DIR, 0o700)
 
 
 def main():

@@ -529,6 +529,7 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     verdict, reason = interceptor_fn(agent_id, tool_name, instrumented_input)
     if canary_verify(f"{verdict} {reason}", canary):
         print(f"[L1.5] Canary trap triggered: {canary}", file=sys.stderr)
+        _log_l15_start()
         _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 canary trap (canary={canary})")
         return "DENY", f"BLOCKED by L1.5 canary trap (canary={canary})", canary
     return verdict, reason, canary

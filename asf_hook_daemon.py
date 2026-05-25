@@ -26,12 +26,19 @@ import signal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 RUNTIME_DIR = os.path.expanduser("~/.cache/asf-hook")
-os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
-_lst = os.lstat(RUNTIME_DIR)
-_st = os.stat(RUNTIME_DIR)
-if _stat.S_ISLNK(_lst.st_mode) or not _stat.S_ISDIR(_st.st_mode) or _st.st_uid != os.getuid():
-    raise RuntimeError(f"unsafe ASF hook runtime dir: {RUNTIME_DIR}")
-os.chmod(RUNTIME_DIR, 0o700)
+try:
+    os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+    _fd = os.open(RUNTIME_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
+    try:
+        _st = os.fstat(_fd)
+        if not _stat.S_ISDIR(_st.st_mode) or _st.st_uid != os.getuid():
+            raise RuntimeError(f"unsafe ASF hook runtime dir: {RUNTIME_DIR}")
+        os.fchmod(_fd, 0o700)
+    finally:
+        os.close(_fd)
+except Exception as _e:
+    print(f"[ASF daemon] unsafe runtime dir: {_e}", file=sys.stderr, flush=True)
+    sys.exit(1)
 SOCKET_PATH = os.path.join(RUNTIME_DIR, "asf_hook.sock")
 PID_FILE    = os.path.join(RUNTIME_DIR, "asf_hook.pid")
 AGENT_ID    = "claude-code-agent"
