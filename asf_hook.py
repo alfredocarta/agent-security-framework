@@ -28,6 +28,9 @@ import fcntl
 
 RUNTIME_DIR     = os.path.expanduser("~/.cache/asf-hook")
 os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+if os.path.islink(RUNTIME_DIR) or not os.path.isdir(RUNTIME_DIR):
+    raise RuntimeError(f"unsafe ASF hook runtime dir: {RUNTIME_DIR}")
+os.chmod(RUNTIME_DIR, 0o700)
 SOCKET_PATH     = os.path.join(RUNTIME_DIR, "asf_hook.sock")
 PID_FILE        = os.path.join(RUNTIME_DIR, "asf_hook.pid")
 LOCK_FILE       = os.path.join(RUNTIME_DIR, "asf_hook.lock")
@@ -49,9 +52,10 @@ TOOL_MAP = {
 }
 
 # Parsed passthrough: single command, no shell metacharacters, no substitution.
+# Excludes file-reading commands (head, tail, wc, stat, du) - those go through ASF.
 _SAFE_PASSTHROUGH_CMDS = {
-    "ls", "cd", "pwd", "wc", "head", "tail", "ps", "pgrep",
-    "which", "type", "stat", "df", "du",
+    "ls", "cd", "pwd", "ps", "pgrep",
+    "which", "type", "df",
 }
 _SHELL_META = re.compile(r"[;&|`$<>\n\r()]")
 
@@ -114,14 +118,36 @@ def _ensure_daemon_locked():
                 for p in WATCHED_FILES
             ):
                 _stop_daemon()
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and _socket_alive():
+                    time.sleep(0.1)
+                try:
+                    os.unlink(SOCKET_PATH)
+                except FileNotFoundError:
+                    pass
+
+    # A daemon may already be starting (PID written but socket not bound yet).
+    if not os.path.exists(SOCKET_PATH) and os.path.exists(PID_FILE):
+        try:
+            pid = int(open(PID_FILE).read().strip())
+            if _pid_belongs_to_daemon(pid):
+                deadline = time.monotonic() + STARTUP_TIMEOUT
+                while time.monotonic() < deadline:
+                    time.sleep(0.15)
+                    if os.path.exists(SOCKET_PATH):
+                        return
+        except Exception:
+            pass
 
     if not os.path.exists(SOCKET_PATH):
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [PYTHON, DAEMON_SCRIPT],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        with open(PID_FILE, "w") as f:
+            f.write(str(proc.pid))
         deadline = time.monotonic() + STARTUP_TIMEOUT
         while time.monotonic() < deadline:
             time.sleep(0.15)

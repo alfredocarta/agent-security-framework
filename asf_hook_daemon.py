@@ -25,6 +25,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 RUNTIME_DIR = os.path.expanduser("~/.cache/asf-hook")
 os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+if os.path.islink(RUNTIME_DIR) or not os.path.isdir(RUNTIME_DIR):
+    raise RuntimeError(f"unsafe ASF hook runtime dir: {RUNTIME_DIR}")
+os.chmod(RUNTIME_DIR, 0o700)
 SOCKET_PATH = os.path.join(RUNTIME_DIR, "asf_hook.sock")
 PID_FILE    = os.path.join(RUNTIME_DIR, "asf_hook.pid")
 AGENT_ID    = "claude-code-agent"
@@ -61,7 +64,13 @@ def handle_client(conn):
                 break
             data += chunk
             if len(data) > MAX_REQUEST_BYTES:
-                raise ValueError("request too large")
+                try:
+                    conn.sendall(
+                        (json.dumps({"verdict": "DENY", "reason": "hook request too large"}) + "\n").encode()
+                    )
+                except OSError:
+                    pass
+                return
             if b"\n" in data:
                 break
 
