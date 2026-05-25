@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import socket
+import stat as _stat
 import subprocess
 import time
 import fcntl
@@ -48,7 +49,7 @@ TOOL_MAP = {
 }
 
 # Parsed passthrough: single command, no shell metacharacters, no substitution.
-# ps/pgrep excluded: wide argument flags (eww, auxww) can expose env vars with tokens.
+# ps/pgrep excluded: wide flag variants (eww, auxww) expose env vars with tokens.
 _SAFE_PASSTHROUGH_CMDS = {
     "ls", "cd", "pwd",
     "which", "type", "df",
@@ -66,13 +67,23 @@ def is_bash_passthrough(command: str) -> bool:
     return bool(parts) and parts[0] in _SAFE_PASSTHROUGH_CMDS
 
 
+def _open_runtime_file(path, mode=0o600):
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, mode)
+    st = os.fstat(fd)
+    if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+        os.close(fd)
+        raise RuntimeError(f"unsafe runtime file: {path}")
+    return os.fdopen(fd, "w")
+
+
 def _pid_belongs_to_daemon(pid: int) -> bool:
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
             capture_output=True, text=True, timeout=2,
         )
-        return "asf_hook_daemon" in result.stdout
+        cmd = result.stdout.strip()
+        return DAEMON_SCRIPT in cmd and "asf_hook_daemon.py" in cmd
     except Exception:
         return False
 
@@ -102,12 +113,24 @@ def _socket_alive() -> bool:
 
 def _ensure_daemon_locked():
     if os.path.exists(SOCKET_PATH):
-        if not _socket_alive():
+        pid_ok = False
+        if os.path.exists(PID_FILE):
+            try:
+                pid_ok = _pid_belongs_to_daemon(int(open(PID_FILE).read().strip()))
+            except Exception:
+                pid_ok = False
+
+        if not pid_ok:
             try:
                 os.unlink(SOCKET_PATH)
             except FileNotFoundError:
                 pass
-        elif os.path.exists(PID_FILE):
+        elif not _socket_alive():
+            try:
+                os.unlink(SOCKET_PATH)
+            except FileNotFoundError:
+                pass
+        else:
             sock_mtime = os.path.getmtime(SOCKET_PATH)
             if any(
                 os.path.exists(p) and os.path.getmtime(p) > sock_mtime
@@ -142,7 +165,7 @@ def _ensure_daemon_locked():
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        with open(PID_FILE, "w") as f:
+        with _open_runtime_file(PID_FILE) as f:
             f.write(str(proc.pid))
         deadline = time.monotonic() + STARTUP_TIMEOUT
         while time.monotonic() < deadline:
@@ -152,7 +175,7 @@ def _ensure_daemon_locked():
 
 
 def ensure_daemon():
-    with open(LOCK_FILE, "w") as lock:
+    with _open_runtime_file(LOCK_FILE) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         _ensure_daemon_locked()
 
@@ -180,7 +203,9 @@ def query_daemon(asf_tool, text):
 
 def _init_runtime_dir():
     os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
-    if os.path.islink(RUNTIME_DIR) or not os.path.isdir(RUNTIME_DIR):
+    lst = os.lstat(RUNTIME_DIR)
+    st = os.stat(RUNTIME_DIR)
+    if _stat.S_ISLNK(lst.st_mode) or not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
         print(f"[ASF DENY] unsafe ASF hook runtime dir: {RUNTIME_DIR}", flush=True)
         sys.exit(2)
     os.chmod(RUNTIME_DIR, 0o700)
@@ -219,7 +244,9 @@ def main():
     for _ in range(RETRIES + 1):
         try:
             data = query_daemon(asf_tool, text)
-            verdict = data.get("verdict", "ALLOW")
+            verdict = data.get("verdict")
+            if verdict not in {"ALLOW", "DENY"}:
+                raise ValueError(f"invalid daemon verdict: {verdict!r}")
             reason = data.get("reason", "")
             if verdict == "ALLOW":
                 sys.exit(0)

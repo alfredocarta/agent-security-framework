@@ -18,6 +18,7 @@ import sys
 import os
 import json
 import socket
+import stat as _stat
 import threading
 import signal
 
@@ -25,7 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 RUNTIME_DIR = os.path.expanduser("~/.cache/asf-hook")
 os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
-if os.path.islink(RUNTIME_DIR) or not os.path.isdir(RUNTIME_DIR):
+_lst = os.lstat(RUNTIME_DIR)
+_st = os.stat(RUNTIME_DIR)
+if _stat.S_ISLNK(_lst.st_mode) or not _stat.S_ISDIR(_st.st_mode) or _st.st_uid != os.getuid():
     raise RuntimeError(f"unsafe ASF hook runtime dir: {RUNTIME_DIR}")
 os.chmod(RUNTIME_DIR, 0o700)
 SOCKET_PATH = os.path.join(RUNTIME_DIR, "asf_hook.sock")
@@ -127,7 +130,8 @@ def main():
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
 
-    with open(PID_FILE, "w") as f:
+    fd = os.open(PID_FILE, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(str(os.getpid()))
 
     signal.signal(signal.SIGTERM, cleanup)
