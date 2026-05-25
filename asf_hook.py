@@ -23,6 +23,7 @@ import re
 import shlex
 import socket
 import stat as _stat
+import struct
 import subprocess
 import time
 import fcntl
@@ -43,6 +44,11 @@ RETRIES         = int(os.environ.get("ASF_HOOK_RETRIES", "2"))
 STARTUP_TIMEOUT = float(os.environ.get("ASF_HOOK_STARTUP_TIMEOUT", "10"))
 FAIL_CLOSED     = os.environ.get("ASF_HOOK_FAIL_CLOSED", "false").lower() == "true"
 MAX_STDIN_BYTES = 256 * 1024
+
+# macOS LOCAL_PEERPID constants (SOL_LOCAL=0, LOCAL_PEERPID=2).
+# getsockopt returns -1 on failure; callers treat -1 as unknown and fall back.
+_SOL_LOCAL      = 0
+_LOCAL_PEERPID  = 2
 
 TOOL_MAP = {
     "Bash": ("shell", lambda i: i.get("command", "")),
@@ -76,6 +82,14 @@ def _open_runtime_file(path, mode=0o600):
     return os.fdopen(fd, "w")
 
 
+def _get_unix_peer_pid(sock) -> int:
+    try:
+        data = sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERPID, 4)
+        return struct.unpack("I", data)[0]
+    except OSError:
+        return -1
+
+
 def _pid_belongs_to_daemon(pid: int) -> bool:
     try:
         result = subprocess.run(
@@ -83,8 +97,37 @@ def _pid_belongs_to_daemon(pid: int) -> bool:
             capture_output=True, text=True, timeout=2,
         )
         cmd = result.stdout.strip()
-        return DAEMON_SCRIPT in cmd and "asf_hook_daemon.py" in cmd
+        parts = shlex.split(cmd)
+        return any(os.path.realpath(p) == os.path.realpath(DAEMON_SCRIPT) for p in parts)
     except Exception:
+        return False
+
+
+def _daemon_trusted(pid: int) -> bool:
+    """Connect to SOCKET_PATH and verify the peer is the expected daemon process."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(0.2)
+        s.connect(SOCKET_PATH)
+        peer_pid = _get_unix_peer_pid(s)
+        if peer_pid != -1:
+            return peer_pid == pid and _pid_belongs_to_daemon(pid)
+        # Peer PID unavailable on this platform; fall back to process name check.
+        return _pid_belongs_to_daemon(pid)
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _socket_alive() -> bool:
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        s.connect(SOCKET_PATH)
+        s.close()
+        return True
+    except OSError:
         return False
 
 
@@ -100,32 +143,17 @@ def _stop_daemon():
         pass
 
 
-def _socket_alive() -> bool:
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        s.connect(SOCKET_PATH)
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
 def _ensure_daemon_locked():
     if os.path.exists(SOCKET_PATH):
-        pid_ok = False
+        trusted = False
         if os.path.exists(PID_FILE):
             try:
-                pid_ok = _pid_belongs_to_daemon(int(open(PID_FILE).read().strip()))
+                pid = int(open(PID_FILE).read().strip())
+                trusted = _daemon_trusted(pid)
             except Exception:
-                pid_ok = False
+                trusted = False
 
-        if not pid_ok:
-            try:
-                os.unlink(SOCKET_PATH)
-            except FileNotFoundError:
-                pass
-        elif not _socket_alive():
+        if not trusted:
             try:
                 os.unlink(SOCKET_PATH)
             except FileNotFoundError:
@@ -234,6 +262,9 @@ def main():
 
     asf_tool, extractor = TOOL_MAP[tool_name]
     text = extractor(tool_input)
+    if not isinstance(text, str):
+        print("[ASF DENY] invalid Bash command payload", flush=True)
+        sys.exit(2)
     if not text or not text.strip():
         sys.exit(0)
 

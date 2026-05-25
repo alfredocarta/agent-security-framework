@@ -19,6 +19,7 @@ import os
 import json
 import socket
 import stat as _stat
+import struct
 import threading
 import signal
 
@@ -42,6 +43,15 @@ FAIL_CLOSED = os.environ.get("ASF_HOOK_FAIL_CLOSED", "false").lower() == "true"
 _client_slots = threading.BoundedSemaphore(MAX_CLIENT_THREADS)
 _shutdown = threading.Event()
 _server = None
+
+
+def _open_runtime_file(path, mode=0o600):
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, mode)
+    st = os.fstat(fd)
+    if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+        os.close(fd)
+        raise RuntimeError(f"unsafe runtime file: {path}")
+    return os.fdopen(fd, "w")
 
 import registry
 from interceptor import hardened_interceptor
@@ -130,8 +140,7 @@ def main():
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
 
-    fd = os.open(PID_FILE, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with _open_runtime_file(PID_FILE) as f:
         f.write(str(os.getpid()))
 
     signal.signal(signal.SIGTERM, cleanup)
@@ -149,10 +158,9 @@ def main():
         try:
             conn, _ = server.accept()
             if not _client_slots.acquire(blocking=False):
-                verdict = "DENY" if FAIL_CLOSED else "ALLOW"
                 try:
                     conn.sendall(
-                        (json.dumps({"verdict": verdict, "reason": "daemon overloaded"}) + "\n").encode()
+                        (json.dumps({"verdict": "DENY", "reason": "daemon overloaded"}) + "\n").encode()
                     )
                 except OSError:
                     pass
