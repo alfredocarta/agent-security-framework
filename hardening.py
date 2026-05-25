@@ -11,6 +11,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
+from audit import AUDITOR as _HARDENING_AUDITOR
+
 # Pre-compiled regex patterns (module load, not per-call)
 _RE_BASE64_CANDIDATE = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
 _RE_ROT13_MARKER = re.compile(r'rot.?13', re.IGNORECASE)
@@ -468,6 +470,13 @@ def canary_verify(output, canary):
 def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     import sys
     original_input = str(tool_input)
+    _l15_start_logged = False
+
+    def _log_l15_start():
+        nonlocal _l15_start_logged
+        if not _l15_start_logged:
+            _HARDENING_AUDITOR.log_event(agent_id, tool_name, "INTERCEPTOR_START", "Interceptor invoked")
+            _l15_start_logged = True
     cleaned_input, had_zero_width = _strip_zero_width(original_input)
     if had_zero_width:
         print("[L1.5] Zero-width characters detected and stripped", file=sys.stderr)
@@ -481,6 +490,8 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
         combined_hidden = ' '.join(hidden_texts)
         hidden_score = _classifier_gate_score(combined_hidden)
         if hidden_score >= 0.2:
+            _log_l15_start()
+            _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 hidden HTML content (score={hidden_score:.2f})")
             return "DENY", f"BLOCKED by L1.5 hidden HTML content (score={hidden_score:.2f})", None
         print(
             f"[L1.5] Hidden HTML text found but score below threshold ({hidden_score:.2f}), continuing",
@@ -492,14 +503,20 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     should_block, score = classifier_gate(classifier_input)
     if should_block:
         print(f"[L1.5] Classifier gate blocked (score={score:.2f})", file=sys.stderr)
+        _log_l15_start()
+        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})")
         return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})", None
     _, decode_score = decode_and_rescan(tool_input)
     if decode_score >= 0.2:
         print("[L1.5] Decode-and-rescan detected encoded payload", file=sys.stderr)
+        _log_l15_start()
+        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)")
         return "DENY", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)", None
     cross_score = _cross_field_classify(tool_input)
     if cross_score >= 0.5:
         print(f"[L1.5] Cross-field correlation detected (score={cross_score:.2f})", file=sys.stderr)
+        _log_l15_start()
+        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 cross-field correlation (score={cross_score:.2f})")
         return "DENY", "BLOCKED by L1.5 cross-field correlation", None
     if interceptor_fn is None:
         return "ALLOW", "Authorized by L1.5 hardening checks.", None
@@ -510,5 +527,7 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     verdict, reason = interceptor_fn(agent_id, tool_name, instrumented_input)
     if canary_verify(f"{verdict} {reason}", canary):
         print(f"[L1.5] Canary trap triggered: {canary}", file=sys.stderr)
+        _log_l15_start()
+        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 canary trap (canary={canary})")
         return "DENY", f"BLOCKED by L1.5 canary trap (canary={canary})", canary
     return verdict, reason, canary
