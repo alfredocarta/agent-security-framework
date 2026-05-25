@@ -27,10 +27,6 @@ import time
 import fcntl
 
 RUNTIME_DIR     = os.path.expanduser("~/.cache/asf-hook")
-os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
-if os.path.islink(RUNTIME_DIR) or not os.path.isdir(RUNTIME_DIR):
-    raise RuntimeError(f"unsafe ASF hook runtime dir: {RUNTIME_DIR}")
-os.chmod(RUNTIME_DIR, 0o700)
 SOCKET_PATH     = os.path.join(RUNTIME_DIR, "asf_hook.sock")
 PID_FILE        = os.path.join(RUNTIME_DIR, "asf_hook.pid")
 LOCK_FILE       = os.path.join(RUNTIME_DIR, "asf_hook.lock")
@@ -52,9 +48,9 @@ TOOL_MAP = {
 }
 
 # Parsed passthrough: single command, no shell metacharacters, no substitution.
-# Excludes file-reading commands (head, tail, wc, stat, du) - those go through ASF.
+# ps/pgrep excluded: wide argument flags (eww, auxww) can expose env vars with tokens.
 _SAFE_PASSTHROUGH_CMDS = {
-    "ls", "cd", "pwd", "ps", "pgrep",
+    "ls", "cd", "pwd",
     "which", "type", "df",
 }
 _SHELL_META = re.compile(r"[;&|`$<>\n\r()]")
@@ -182,16 +178,28 @@ def query_daemon(asf_tool, text):
     return json.loads(resp.decode().strip())
 
 
+def _init_runtime_dir():
+    os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
+    if os.path.islink(RUNTIME_DIR) or not os.path.isdir(RUNTIME_DIR):
+        print(f"[ASF DENY] unsafe ASF hook runtime dir: {RUNTIME_DIR}", flush=True)
+        sys.exit(2)
+    os.chmod(RUNTIME_DIR, 0o700)
+
+
 def main():
+    _init_runtime_dir()
+
     raw = sys.stdin.buffer.read(MAX_STDIN_BYTES + 1)
     if len(raw) > MAX_STDIN_BYTES:
-        sys.exit(2 if FAIL_CLOSED else 0)
+        print("[ASF DENY] hook request too large", flush=True)
+        sys.exit(2)
     raw = raw.decode("utf-8", errors="replace")
 
     try:
         payload = json.loads(raw)
     except Exception:
-        sys.exit(2 if FAIL_CLOSED else 0)
+        print("[ASF DENY] invalid hook request", flush=True)
+        sys.exit(2)
 
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {})

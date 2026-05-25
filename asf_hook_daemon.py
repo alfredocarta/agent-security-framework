@@ -109,11 +109,16 @@ def cleanup(signum=None, frame=None):
             _server.close()
         except OSError:
             pass
-    for path in (SOCKET_PATH, PID_FILE):
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+    try:
+        owns_pid = int(open(PID_FILE).read().strip()) == os.getpid()
+    except Exception:
+        owns_pid = False
+    if owns_pid:
+        for path in (SOCKET_PATH, PID_FILE):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
 
 
 def main():
