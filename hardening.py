@@ -125,7 +125,9 @@ ZERO_WIDTH_CHARS = frozenset([
     '\uffa0',  # Halfwidth Hangul Filler
 ])
 ZERO_WIDTH_RANGES = [
-    (0x0000, 0x000F),   # Null bytes and C0 controls
+    (0x0000, 0x0008),   # Null and C0 controls (SOH-BS), excluding tab/LF/CR
+    (0x000B, 0x000C),   # VT and FF (not tab=0x09, LF=0x0A, or CR=0x0D)
+    (0x000E, 0x000F),   # SO and SI
     (0xFE00, 0xFE0F),   # Variation selectors
     (0xE0000, 0xE007F), # Unicode Tags
 ]

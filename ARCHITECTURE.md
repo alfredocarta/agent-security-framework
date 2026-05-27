@@ -113,6 +113,7 @@ hardened_interceptor(agent_id, tool_name, tool_input)
 | ASF_DISABLE_L15 | false | Disable L1.5 hardening |
 | ASF_DISABLE_FASTPATH | false | Disable heuristic fast-path |
 | ASF_CLEAR_THRESHOLD | 0.05 | Heuristic score below which to CLEAR |
+| ASF_SOFT_THRESHOLD | 0.10 | L1.5 score above which Stage 2 SAFE escalates to Stage 2.5; set 0.0 to disable |
 | ASF_HEURISTIC_BLOCK | 0.7 | Heuristic score above which to BLOCK |
 | ASF_STAGE3_BACKEND | llm | Stage 3 backend: llm or onnx |
 | OLLAMA_BASE_URL | http://localhost:11434/v1 | Ollama endpoint |

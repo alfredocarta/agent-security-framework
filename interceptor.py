@@ -101,6 +101,7 @@ _detection = _policies.get("detection", {})
 BLOCK_THRESHOLD = float(_detection.get("block_threshold", 0.85))
 PASS_THRESHOLD = float(_detection.get("pass_threshold", 0.25))
 HEURISTIC_CLEAR_THRESHOLD = float(os.environ.get("ASF_CLEAR_THRESHOLD", "0.05"))
+SOFT_THRESHOLD = float(os.environ.get("ASF_SOFT_THRESHOLD", "0.10"))
 HEURISTIC_BLOCK_THRESHOLD = float(os.environ.get("ASF_HEURISTIC_BLOCK", "0.7"))
 _FASTPATH_ENABLED = os.environ.get("ASF_DISABLE_FASTPATH", "").lower() != "true"
 _FASTPATH_STATS = {
@@ -303,7 +304,7 @@ def _stage3_onnx(tool_input: str):
 
     return _onnx_classify(tool_input)
 
-def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_fastpath=False):
+def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_fastpath=False, l15_score=0.0):
     trace_id = uuid.uuid4().hex
     t0 = time.monotonic()
 
@@ -354,6 +355,9 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                           trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
         return "DENY", f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
 
+    stage25_enabled = os.environ.get("ASF_DISABLE_STAGE25", "").lower() != "true"
+    soft_escalate = False
+
     if verdict == "SAFE":
         if os.environ.get("ASF_ALWAYS_LLM", "").lower() == "true":
             AUDITOR.log_event(agent_id, tool_name, "STAGE_3_DOUBLE_CHECK", "ASF_ALWAYS_LLM active",
@@ -364,17 +368,33 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                 AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 3 double-check: dangerous",
                                   trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
                 return "DENY", "KILL SWITCH ACTIVATED (Stage 3 double-check)."
-        AUDITOR.log_event(agent_id, tool_name, "ALLOWED", f"Stage 2 PASS: dangerous_proba <= {PASS_THRESHOLD} (confidence: {confidence:.2f})",
-                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
-        return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
+        if stage25_enabled and SOFT_THRESHOLD > 0 and l15_score > SOFT_THRESHOLD:
+            soft_escalate = True
+            AUDITOR.log_event(
+                agent_id,
+                tool_name,
+                "STAGE_2_SOFT_ESCALATE",
+                f"Stage2 SAFE but L1.5 score {l15_score:.2f} > soft threshold {SOFT_THRESHOLD:.2f}, escalating to Stage2.5",
+                trace_id=trace_id,
+                latency_ms=_ms(),
+                confidence=confidence,
+                session_id=session_id,
+            )
+        else:
+            AUDITOR.log_event(agent_id, tool_name, "ALLOWED", f"Stage 2 PASS: dangerous_proba <= {PASS_THRESHOLD} (confidence: {confidence:.2f})",
+                              trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
+            return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
 
-    AUDITOR.log_event(agent_id, tool_name, "STAGE_2_UNCERTAIN", f"Classifier uncertain, dangerous_proba in grey zone (confidence: {confidence:.2f})",
-                      trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
-    print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
+    if not soft_escalate:
+        AUDITOR.log_event(agent_id, tool_name, "STAGE_2_UNCERTAIN", f"Classifier uncertain, dangerous_proba in grey zone (confidence: {confidence:.2f})",
+                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
+        print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
+    else:
+        print(f"[STAGE 2] SAFE with L1.5 score {l15_score:.2f}, escalating to Stage 2.5.", file=__import__("sys").stderr)
 
     # Stage 2.5a: DeBERTa fast gate. Stage 2.5b is strictly conditional on
     # DeBERTa returning UNCERTAIN.
-    if os.environ.get("ASF_DISABLE_STAGE25", "").lower() != "true":
+    if stage25_enabled:
         try:
             AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_START", "DeBERTa fast gate",
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
@@ -495,18 +515,22 @@ def hardened_interceptor(agent_id, tool_name, tool_input, session_id=None):
     Use this instead of security_interceptor for production deployments.
     """
     from hardening import apply_l1_5_hardening
-    if session_id is None:
-        return apply_l1_5_hardening(
-            agent_id,
-            tool_name,
-            tool_input,
-            lambda a, t, i: security_interceptor(a, t, i, use_fastpath=True),
+
+    l15_score = _classifier_gate_score(str(tool_input))
+
+    def _interceptor(a, t, i):
+        return security_interceptor(
+            a,
+            t,
+            i,
+            session_id=session_id,
+            use_fastpath=True,
+            l15_score=l15_score,
         )
+
     return apply_l1_5_hardening(
         agent_id,
         tool_name,
         tool_input,
-        lambda a, t, i: security_interceptor(
-            a, t, i, session_id=session_id, use_fastpath=True
-        ),
+        _interceptor,
     )
