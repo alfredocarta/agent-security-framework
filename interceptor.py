@@ -245,7 +245,7 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
         )
         return "DENY", f"BLOCKED by heuristic (score={heuristic_score:.2f})"
 
-    if heuristic_score <= HEURISTIC_CLEAR_THRESHOLD:
+    if heuristic_score <= HEURISTIC_CLEAR_THRESHOLD and not os.environ.get("ASF_ALWAYS_STAGE25", "").lower() == "true":
         _FASTPATH_STATS["HEURISTIC_CLEAR"] += 1
         AUDITOR.log_event(
             agent_id,
@@ -356,6 +356,7 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         return "DENY", f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
 
     stage25_enabled = os.environ.get("ASF_DISABLE_STAGE25", "").lower() != "true"
+    always_stage25 = os.environ.get("ASF_ALWAYS_STAGE25", "").lower() == "true"
     soft_escalate = False
 
     if verdict == "SAFE":
@@ -368,17 +369,19 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                 AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 3 double-check: dangerous",
                                   trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
                 return "DENY", "KILL SWITCH ACTIVATED (Stage 3 double-check)."
-        if stage25_enabled and SOFT_THRESHOLD > 0 and l15_score > SOFT_THRESHOLD:
+        if stage25_enabled and always_stage25:
             soft_escalate = True
             AUDITOR.log_event(
-                agent_id,
-                tool_name,
-                "STAGE_2_SOFT_ESCALATE",
+                agent_id, tool_name, "STAGE_2_SOFT_ESCALATE",
+                "Stage2 SAFE but ASF_ALWAYS_STAGE25 active, escalating to Stage2.5",
+                trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
+            )
+        elif stage25_enabled and SOFT_THRESHOLD > 0 and l15_score > SOFT_THRESHOLD:
+            soft_escalate = True
+            AUDITOR.log_event(
+                agent_id, tool_name, "STAGE_2_SOFT_ESCALATE",
                 f"Stage2 SAFE but L1.5 score {l15_score:.2f} > soft threshold {SOFT_THRESHOLD:.2f}, escalating to Stage2.5",
-                trace_id=trace_id,
-                latency_ms=_ms(),
-                confidence=confidence,
-                session_id=session_id,
+                trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
             )
         else:
             AUDITOR.log_event(agent_id, tool_name, "ALLOWED", f"Stage 2 PASS: dangerous_proba <= {PASS_THRESHOLD} (confidence: {confidence:.2f})",
@@ -389,6 +392,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         AUDITOR.log_event(agent_id, tool_name, "STAGE_2_UNCERTAIN", f"Classifier uncertain, dangerous_proba in grey zone (confidence: {confidence:.2f})",
                           trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
         print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
+    elif always_stage25:
+        print(f"[STAGE 2] ASF_ALWAYS_STAGE25 active, escalating to Stage 2.5.", file=__import__("sys").stderr)
     else:
         print(f"[STAGE 2] SAFE with L1.5 score {l15_score:.2f}, escalating to Stage 2.5.", file=__import__("sys").stderr)
 
