@@ -64,13 +64,22 @@ _RE_KNOWN_PAYLOADS = (
     (re.compile(r'\bthat is enough\b.{0,30}\bnow\b', _I), 0.6),
     (re.compile(r'\byou\'ve outdone\b', _I), 0.5),
     # German injection keywords
-    (re.compile(r'\bvergiss\b.{0,30}\b(?:vorherigen?|bisherigen?|deine)\b.{0,20}\b(?:aufgaben|befehle|instruktionen|anweisungen)\b', _I), 0.8),
-    (re.compile(r'\bstell dir vor\b.{0,30}\bdu bist\b', _I), 0.7),
-    (re.compile(r'\bich möchte, dass sie\b.{0,30}\b(?:als|wie)\b.{0,30}\bfungieren\b', _I), 0.65),
-    (re.compile(r'\bignoriere\b.{0,30}\b(?:anweisungen|befehle|regeln)\b', _I), 0.75),
+    (re.compile(r'\bvergiss\b.{0,30}\b(?:alle|vorherigen?|bisherigen?|deine)?\b.{0,20}\b(?:aufgaben|befehle|instruktionen|anweisungen)\b', _I), 0.8),
+    (re.compile(r'\bstell dir vor\b.{0,30}\b(?:du |ihr )?bist\b', _I), 0.7),
+    (re.compile(r'\bich möchte,? dass (?:sie|du)\b.{0,30}\b(?:als|wie)\b.{0,30}\bfungieren\b', _I), 0.65),
+    (re.compile(r'\bignoriere\b.{0,30}\b(?:alle |deine )?(?:anweisungen|befehle|regeln)\b', _I), 0.75),
     # Translation exploitation
     (re.compile(r'\bexploiting (?:AI|this system)\b', _I), 0.8),
     (re.compile(r'(?:input|output).{0,15}(?:input|output).{0,15}(?:input|output)', _I), 0.5),
+    # Forget/override commands direct
+    (re.compile(r'\bforget (?:all |your )?(?:previous |prior )?(?:instructions?|tasks|rules|commands)', _I), 0.7),
+    (re.compile(r'\bforget (?:about |)(?:all |)these instructions', _I), 0.75),
+    (re.compile(r'\boverride (?:your |all |)instructions', _I), 0.7),
+    (re.compile(r'\bprint.{0,30}\byour (?:system |)prompt', _I), 0.8),
+    (re.compile(r'\breveal.{0,30}\byour (?:initial |system |)instructions', _I), 0.75),
+    (re.compile(r'\bshow.{0,30}\b(?:the |your )?system prompt', _I), 0.75),
+    (re.compile(r'\bshow.{0,30}\byour (?:initial |)instructions', _I), 0.65),
+    (re.compile(r'\b(?:system |)prompt is', _I), 0.5),
 )
 _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:print|output|say|echo|write|return)\s+["\']'),
