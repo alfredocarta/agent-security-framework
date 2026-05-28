@@ -158,13 +158,17 @@ ZERO_WIDTH_CHARS_SOFT = frozenset([
     '\uffa0',  # Halfwidth Hangul Filler
 ])
 ZERO_WIDTH_CHARS = ZERO_WIDTH_CHARS_CRITICAL | ZERO_WIDTH_CHARS_SOFT
+# Critical ranges: return 1.0 — only appear in adversarial contexts
 ZERO_WIDTH_RANGES = [
     (0x0000, 0x0008),   # Null and C0 controls (SOH-BS), excluding tab/LF/VT/FF/CR
     (0x000E, 0x001F),   # SO–SI and remaining C0 controls (DLE–US)
     (0x007F, 0x007F),   # DEL
     (0x0080, 0x009F),   # C1 controls
-    (0xFE00, 0xFE0F),   # Variation selectors
-    (0xE0000, 0xE007F), # Variation selectors supplement / Unicode Tags
+    (0xE0000, 0xE007F), # Unicode Tags (adversarial obfuscation)
+]
+# Soft ranges: return 0.3 — appear in legitimate emoji/script text
+ZERO_WIDTH_RANGES_SOFT = [
+    (0xFE00, 0xFE0F),   # Variation selectors (emoji/text presentation, ☎︎ ❤️)
 ]
 
 @dataclass
@@ -184,15 +188,16 @@ _FEATURE_WEIGHTS = {
 
 
 def _strip_zero_width(text: str) -> tuple[str, bool]:
+    """Strip only critical zero-width chars. Soft chars (ZWJ, ZWNJ, etc.) are left
+    in place — stripping them breaks Persian/Indic orthography and emoji composition."""
     found = False
     cleaned = []
     for ch in text:
         cp = ord(ch)
-        if ch in ZERO_WIDTH_CHARS:
+        if ch in ZERO_WIDTH_CHARS_CRITICAL:
             found = True
             continue
-        in_range = any(lo <= cp <= hi for lo, hi in ZERO_WIDTH_RANGES)
-        if in_range:
+        if any(lo <= cp <= hi for lo, hi in ZERO_WIDTH_RANGES):
             found = True
             continue
         cleaned.append(ch)
@@ -207,6 +212,9 @@ def _detect_zero_width(text: str) -> float:
             return 1.0
     for ch in text:
         if ch in ZERO_WIDTH_CHARS_SOFT:
+            return 0.3
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in ZERO_WIDTH_RANGES_SOFT):
             return 0.3
     return 0.0
 
@@ -364,7 +372,12 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
     total_w = sum(_FEATURE_WEIGHTS.values())
     score = sum(features[f] * _FEATURE_WEIGHTS[f] for f in features) / total_w
     active = sum(1 for v in features.values() if v > 0.3)
-    if active >= 2:
+    has_strong = (
+        features.get("known_payloads", 0.0) > 0
+        or features.get("zero_width", 0.0) > 0
+        or features.get("sensitive_file_abuse", 0.0) > 0
+    )
+    if active >= 2 and has_strong:
         score = min(score * (1 + 0.3 * (active - 1)), 1.0)
     top = [f"{n}={v:.2f}" for n, v in sorted(features.items(), key=lambda x: x[1], reverse=True) if v > 0.3]
     blocked = bool(critical) or score >= threshold
