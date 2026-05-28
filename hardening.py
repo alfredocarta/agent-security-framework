@@ -266,6 +266,12 @@ def _strip_hidden_html_text(text: str) -> str:
         text = text[:start] + text[end:]
     return text
 
+_BASE64_ATTACK_WORDS = frozenset({
+    'ignore previous instructions', 'disregard', 'forget your instructions',
+    'override your', 'you are now', 'act as dan', 'developer mode',
+    'hijack', 'jailbreak',
+})
+
 def _detect_base64(text):
     matches = _RE_BASE64_CANDIDATE.findall(text)
     if not matches:
@@ -273,9 +279,11 @@ def _detect_base64(text):
     for m in sorted(matches, key=len, reverse=True):
         try:
             decoded = base64.b64decode(m).decode('utf-8', errors='ignore')
-            words = {'ignore','print','output','execute','system','instructions','hijack','override'}
-            if any(w in decoded.lower() for w in words):
-                return 1.0
+            if len(decoded) > 8192:
+                decoded = decoded[:8192]
+            dl = decoded.lower()
+            if any(w in dl for w in _BASE64_ATTACK_WORDS):
+                return 0.65  # strong signal but not alone-critical — needs combination
             return 0.3
         except Exception:
             continue
@@ -318,8 +326,8 @@ def _detect_unicode_anomalies(text):
             if 'LATIN' in name: scripts.add('LATIN')
             elif 'CYRILLIC' in name: scripts.add('CYRILLIC')
             elif 'GREEK' in name: scripts.add('GREEK')
-    if 'LATIN' in scripts and 'CYRILLIC' in scripts: return 0.8
-    if 'LATIN' in scripts and 'GREEK' in scripts: return 0.5
+    if 'LATIN' in scripts and 'CYRILLIC' in scripts: return 0.5
+    if 'LATIN' in scripts and 'GREEK' in scripts: return 0.4
     return 0.0
 
 def _detect_known_payloads(text):
@@ -491,10 +499,13 @@ def decode_and_rescan(tool_input, stage1_regex_fn=None):
         print("[L1.5] Embedded hex encoding request detected", file=__import__("sys").stderr)
         return embedded_decoded, 0.3
 
+    _MAX_DECODE_BYTES = 512 * 1024  # 512 KB cap on decoded output per layer
     current = tool_input
     for depth in range(1, 6):
         decoded, changed = _try_decode_all(current)
         if not changed:
+            break
+        if len(decoded) > _MAX_DECODE_BYTES:
             break
         score = _classifier_gate_score(decoded)
         if score >= 0.2:
