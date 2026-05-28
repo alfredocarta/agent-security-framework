@@ -71,15 +71,12 @@ _RE_KNOWN_PAYLOADS = (
     # Translation exploitation
     (re.compile(r'\bexploiting (?:AI|this system)\b', _I), 0.8),
     (re.compile(r'(?:input|output).{0,15}(?:input|output).{0,15}(?:input|output)', _I), 0.5),
-    # Forget/override commands direct
+    # Forget/override — only patterns not already covered by interceptor.py probe
     (re.compile(r'\bforget (?:all |your )?(?:previous |prior )?(?:instructions?|tasks|rules|commands)', _I), 0.7),
     (re.compile(r'\bforget (?:about |)(?:all |)these instructions', _I), 0.75),
-    (re.compile(r'\boverride (?:your |all |)instructions', _I), 0.7),
     (re.compile(r'\bprint.{0,30}\byour (?:system |)prompt', _I), 0.8),
-    (re.compile(r'\breveal.{0,30}\byour (?:initial |system |)instructions', _I), 0.75),
-    (re.compile(r'\bshow.{0,30}\b(?:the |your )?system prompt', _I), 0.75),
-    (re.compile(r'\bshow.{0,30}\byour (?:initial |)instructions', _I), 0.65),
-    (re.compile(r'\b(?:system |)prompt is', _I), 0.5),
+    # Narrowed: require exfiltration verb to avoid "the system prompt is documented at..."
+    (re.compile(r'\b(?:reveal|show|print|repeat|output).{0,30}\b(?:system )?prompt is\b', _I), 0.65),
 )
 _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:print|output|say|echo|write|return)\s+["\']'),
@@ -185,10 +182,6 @@ _FEATURE_WEIGHTS = {
     "sensitive_file_abuse": 0.25, "zero_width": 1.0,
 }
 
-# Thresholds for heuristic fast-path (deepset/opi optimized)
-_HEURISTIC_BLOCK = float(os.environ.get("ASF_HEURISTIC_BLOCK", "0.50"))
-_HEURISTIC_CLEAR = float(os.environ.get("ASF_CLEAR_THRESHOLD", "0.02"))
-_SOFT_THRESHOLD = float(os.environ.get("ASF_SOFT_THRESHOLD", "0.12"))
 
 def _strip_zero_width(text: str) -> tuple[str, bool]:
     found = False
