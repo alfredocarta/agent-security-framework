@@ -318,10 +318,10 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         'zero_width': _detect_zero_width(text),
     }
     doc_confidence = _detect_document_context(text)
-    if os.environ.get("ASF_DISABLE_DOC_DAMPENER", "").lower() != "true" and doc_confidence >= 0.4:
-        dampened = {"instruction_lang", "entropy"}
-        for f in dampened:
-            features[f] *= max(0.0, 1.0 - doc_confidence)
+    if os.environ.get("ASF_DISABLE_DOC_DAMPENER", "").lower() != "true" and doc_confidence >= 0.7:
+        if not (features.get("known_payloads", 0.0) >= 0.5 or features.get("sensitive_file_abuse", 0.0) >= 0.5 or features.get("instruction_lang", 0.0) >= 0.6):
+            for f in ["instruction_lang", "entropy"]:
+                features[f] *= max(0.5, 1.0 - doc_confidence * 0.5)
     critical = {f: v for f, v in features.items() if v >= 0.7}
     total_w = sum(_FEATURE_WEIGHTS.values())
     score = sum(features[f] * _FEATURE_WEIGHTS[f] for f in features) / total_w
