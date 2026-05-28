@@ -26,8 +26,8 @@ _RE_SEMANTIC_PROBE = (
     re.compile(r'\bignore (your )?(previous |prior |all |everything )?(instructions?|training|guidelines?|rules?|prompt|above|safety policy|system message)\b', re.IGNORECASE),
     re.compile(r'\bforget (your |all )?(previous |prior )?(instructions?|training|guidelines?|rules?)\b', re.IGNORECASE),
     re.compile(r'\boverride (your )?(instructions?|system prompt?|guidelines?|developer message)\b', re.IGNORECASE),
-    re.compile(r'\b(simulate|act in|operate in) (an? )?(unrestricted|uncensored|unfiltered|jailbroken|no.?filter)\b', re.IGNORECASE),
-    re.compile(r'\b(disable|turn off|remove|bypass) (your )?(safety|content filter|restrictions?|guardrails?|alignment)\b', re.IGNORECASE),
+    re.compile(r'\b(simulate|run as|operate as) (an? )?(unrestricted|uncensored|unfiltered|jailbroken) (ai|model|assistant|chatbot|llm|mode|version)\b', re.IGNORECASE),
+    re.compile(r'\b(disable|turn off|remove|bypass) your (safety|content filter|restrictions?|guardrails?|alignment)\b', re.IGNORECASE),
     re.compile(r'\b(from now on|starting now)[,\s].{0,60}(you (are|will|should|must)|your (task|role|job))\b', re.IGNORECASE),
     re.compile(r'\byour (new |actual |real |true )(task|role|instructions?|objective|purpose)\b', re.IGNORECASE),
     re.compile(r'\bdo not (follow|obey|adhere to)\b', re.IGNORECASE),
@@ -35,6 +35,22 @@ _RE_SEMANTIC_PROBE = (
     re.compile(r'\b(reveal|show|print|output|repeat|display|write out).{0,30}\b(system prompt|system message|initial prompt|instructions)\b', re.IGNORECASE),
     re.compile(r'\b(enable|activate|unlock|turn on).{0,20}\b(developer mode|jailbreak|unrestricted|no.?filter|dan)\b', re.IGNORECASE),
     re.compile(r'<\|im_(start|end|sep)\|>|<\|system\|>|\[INST\]|\[\/INST\]|<<SYS>>'),
+    # Direct identity assignment (deepset/opi focus)
+    re.compile(r'\bnow you are\b\s{0,5}\b[a-zA-Z]', re.IGNORECASE),
+    re.compile(r'^you are\s{0,5}(?:an? |the )?(?:[A-Z][a-z]+)', re.IGNORECASE),
+    re.compile(r'\byou are\s{0,5}(?:an? |the )?(?:[A-Z][a-z]+).*\?', re.IGNORECASE),
+    # Fictional framing / indirect role assumption
+    re.compile(r'(?:film|movie|scene|play).{0,50}(?:actor|character|role).{0,50}(?:asks?|says?|speaks?)', re.IGNORECASE),
+    re.compile(r'(?:two people|actors).{0,80}(?:in their roles|stay in character|breaking character)', re.IGNORECASE),
+    re.compile(r'(?:character|person).{0,30}is (?:the |a )?(?:master|hacker|thief|expert).{0,30}(?:asks?|says?)', re.IGNORECASE),
+    # Praise + pivot patterns
+    re.compile(r'(?:excellent|great|well done|fantastic|outdone).{0,30}\bnow\b.{0,30}\b(task|help|question|answer)', re.IGNORECASE),
+    re.compile(r'\bthat is (?:done|enough|finished)\b.{0,30}\bnow\b.{0,30}(?:write|answer|help)', re.IGNORECASE),
+    # Translation/exploitation framing
+    re.compile(r'\bexploiting (?:AI|AI systems|this system)\b', re.IGNORECASE),
+    re.compile(r'(?:spanish|french|german|italian).{0,20}(?:input|output).{0,20}(?:input|output)', re.IGNORECASE),
+    # Authority/source spoofing: SYSTEM: / DEVELOPER: headers followed by injection keywords
+    re.compile(r'(?m)^\s*(system|developer|assistant)\s*:\s*.{0,80}\b(ignore|override|disregard|reveal|bypass)\b', re.IGNORECASE),
 )
 
 
@@ -411,7 +427,7 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
     def _ms():
         return int((time.monotonic() - t0) * 1000)
 
-    print(f"\n[SECURITY] Analyzing: {agent_id} -> {tool_name}", file=__import__("sys").stderr)
+    print(f"\n[SECURITY] Analyzing: {agent_id} -> {tool_name}", file=sys.stderr)
     AUDITOR.log_event(agent_id, tool_name, "INTERCEPTOR_START", "Interceptor invoked",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
 
@@ -447,7 +463,7 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
     AUDITOR.log_event(agent_id, tool_name, "STAGE_2_START", "ML classifier analysis",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     verdict, confidence = _stage2_classifier(tool_input)
-    print(f"[STAGE 2] Verdict: {verdict} (confidence: {confidence:.2f})", file=__import__("sys").stderr)
+    print(f"[STAGE 2] Verdict: {verdict} (confidence: {confidence:.2f})", file=sys.stderr)
 
     if verdict == "DANGEROUS":
         registry.suspend_agent(agent_id)
@@ -500,13 +516,13 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
     if not soft_escalate:
         AUDITOR.log_event(agent_id, tool_name, "STAGE_2_UNCERTAIN", f"Classifier uncertain, dangerous_proba in grey zone (confidence: {confidence:.2f})",
                           trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
-        print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
+        print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=sys.stderr)
     elif always_stage25:
-        print(f"[STAGE 2] ASF_ALWAYS_STAGE25 active, escalating to Stage 2.5.", file=__import__("sys").stderr)
+        print(f"[STAGE 2] ASF_ALWAYS_STAGE25 active, escalating to Stage 2.5.", file=sys.stderr)
     elif semantic_escalate:
-        print("[STAGE 2] SAFE but semantic probe active, escalating to Stage 2.5.", file=__import__("sys").stderr)
+        print("[STAGE 2] SAFE but semantic probe active, escalating to Stage 2.5.", file=sys.stderr)
     else:
-        print(f"[STAGE 2] SAFE with L1.5 score {l15_score:.2f}, escalating to Stage 2.5.", file=__import__("sys").stderr)
+        print(f"[STAGE 2] SAFE with L1.5 score {l15_score:.2f}, escalating to Stage 2.5.", file=sys.stderr)
 
     # Stage 2.5a: DeBERTa fast gate. Stage 2.5b is strictly conditional on
     # DeBERTa returning UNCERTAIN.
@@ -571,6 +587,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                     )
         except Exception as exc:
             print(f"[STAGE 2.5] DeBERTa error: {exc}", file=sys.stderr)
+            AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_ERROR", str(exc),
+                              trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
 
     if not stage25_enabled:
         _stage3_reason = "Stage 2.5 disabled (ASF_DISABLE_STAGE25=true), escalating to Stage 3"
@@ -582,9 +600,9 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     if _STAGE3_BACKEND == "openrouter":
         model_name = os.environ.get("ASF_OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct")
-        print(f"[STAGE 3] {_stage3_reason} → OPENROUTER ({model_name}).", file=__import__("sys").stderr)
+        print(f"[STAGE 3] {_stage3_reason} → OPENROUTER ({model_name}).", file=sys.stderr)
     else:
-        print(f"[STAGE 3] {_stage3_reason} → {_STAGE3_BACKEND.upper()}.", file=__import__("sys").stderr)
+        print(f"[STAGE 3] {_stage3_reason} → {_STAGE3_BACKEND.upper()}.", file=sys.stderr)
 
     if _STAGE3_BACKEND == "onnx":
         AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "ONNX Prompt Guard analysis",

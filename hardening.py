@@ -132,7 +132,9 @@ ZERO_WIDTH_CHARS = frozenset([
 ])
 ZERO_WIDTH_RANGES = [
     (0x0000, 0x0008),   # Null and C0 controls (SOH-BS), excluding tab/LF/VT/FF/CR
-    (0x000E, 0x000F),   # SO and SI
+    (0x000E, 0x001F),   # SO–SI and remaining C0 controls (DLE–US)
+    (0x007F, 0x007F),   # DEL
+    (0x0080, 0x009F),   # C1 controls
     (0xFE00, 0xFE0F),   # Variation selectors
     (0xE0000, 0xE007F), # Variation selectors supplement / Unicode Tags
 ]
