@@ -31,7 +31,7 @@ _RE_STRUCTURAL_ROLE_BRACKET = re.compile(
     re.IGNORECASE,
 )
 _RE_STRUCTURAL_CHAT_TOKEN = re.compile(
-    r'<\|(?:im_start|im_end|system|user|assistant)\|>',
+    r'<\|(?:im_start|im_end|im_sep|system|user|assistant)\|>',
     re.IGNORECASE,
 )
 _RE_STRUCTURAL_LONG_DELIMITER = re.compile(r'[-=]{10,}')
@@ -44,13 +44,13 @@ _RE_KNOWN_PAYLOADS = (
     (re.compile(r'this prompt has been.*hijacked'), 0.9),
     (re.compile(r'pass (?:its|the) content as .?sidenote'), 0.9),
     (re.compile(r'stop everything.*now.*(?:print|say|output)'), 0.8),
-    (re.compile(r'your (?:new |real |actual )task'), 0.5),
-    (re.compile(r'disregard (?:all )?(?:previous|prior)'), 0.5),
-    (re.compile(r'ignore (?:all )?(?:previous|prior) (?:instructions?|rules)'), 0.5),
+    (re.compile(r'your (?:new |real |actual )task'), 0.65),
+    (re.compile(r'disregard (?:all )?(?:previous|prior)'), 0.65),
+    (re.compile(r'ignore (?:all )?(?:previous|prior) (?:instructions?|rules)'), 0.75),
     (re.compile(r'ignore .{0,30}instructions'), 0.75),
     (re.compile(r'ignore .{0,10}rules'), 0.72),
     (re.compile(r'new (?:task|instructions?|objective)'), 0.4),
-    (re.compile(r'drop\\s+table'), 0.9),
+    (re.compile(r'drop\s+table', re.IGNORECASE), 0.9),
     # Direct identity assignment (deepset/opi focus)
     (re.compile(r'\bnow you are\b.{0,30}\b(?:[A-Z][a-z]+|an? [A-Z])'), 0.75),
     (re.compile(r'^you are\b.{0,30}\b(?:an? |the )?(?:[A-Z][a-z]+)'), 0.7),
@@ -64,9 +64,9 @@ _RE_KNOWN_PAYLOADS = (
     (re.compile(r'\bthat is enough\b.{0,30}\bnow\b'), 0.6),
     (re.compile(r'\byou\'ve outdone\b'), 0.5),
     # German injection keywords
-    (re.compile(r'\bvergiss\b.{0,30}\b(?:aufgaben|befehle|instruktionen)\b', re.IGNORECASE), 0.8),
-    (re.compile(r'\bstell dir vor\b.{0,30}\bbist\b', re.IGNORECASE), 0.7),
-    (re.compile(r'\bich möchte, dass sie\b.{0,30}\bfungieren\b', re.IGNORECASE), 0.7),
+    (re.compile(r'\bvergiss\b.{0,30}\b(?:vorherigen?|bisherigen?|deine)\b.{0,20}\b(?:aufgaben|befehle|instruktionen|anweisungen)\b', re.IGNORECASE), 0.8),
+    (re.compile(r'\bstell dir vor\b.{0,30}\bdu bist\b', re.IGNORECASE), 0.7),
+    (re.compile(r'\bich möchte, dass sie\b.{0,30}\b(?:als|wie)\b.{0,30}\bfungieren\b', re.IGNORECASE), 0.65),
     (re.compile(r'\bignoriere\b.{0,30}\b(?:anweisungen|befehle|regeln)\b', re.IGNORECASE), 0.75),
     # Translation exploitation
     (re.compile(r'\bexploiting (?:AI|this system)\b', re.IGNORECASE), 0.8),
