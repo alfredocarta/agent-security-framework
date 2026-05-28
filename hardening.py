@@ -5,6 +5,7 @@ import binascii
 import codecs
 import json as _json
 import math
+import os
 import re
 import unicodedata
 import uuid
@@ -81,6 +82,11 @@ _RE_HIDDEN_STYLE = re.compile(
 )
 _RE_HTML_TAG_OPEN = re.compile(r'<(\w+)')
 _RE_HTML_TAG_CONTENT = re.compile(r'<[^>]+>(.*?)</[^>]+>', re.DOTALL)
+_RE_DOC_HEADER = re.compile(r'^#{1,6}\s+\w', re.MULTILINE)
+_RE_DOC_BULLET = re.compile(r'^\s*[-*+]\s+\w|\^\d+\.\s+\w', re.MULTILINE)
+_RE_DOC_CODE_BLOCK = re.compile(r'```|\t{1}|\n {4}')
+_RE_DOC_TABLE_ROW = re.compile(r'^\|.*\|', re.MULTILINE)
+_RE_DOC_EXAMPLE = re.compile(r'\bexample[s]?\b|\bfor instance\b|\be\.g\.\b', re.IGNORECASE)
 
 _DELIMITER = "^"
 _EXTERNAL_DATA_FIELDS = frozenset({
@@ -290,6 +296,15 @@ def _compute_entropy(text):
     if entropy > 5.0: return 0.3
     return 0.0
 
+def _detect_document_context(text: str) -> float:
+    score = 0.0
+    if _RE_DOC_HEADER.search(text): score += 0.35
+    if _RE_DOC_BULLET.search(text): score += 0.25
+    if _RE_DOC_CODE_BLOCK.search(text): score += 0.25
+    if _RE_DOC_TABLE_ROW.search(text): score += 0.20
+    if _RE_DOC_EXAMPLE.search(text): score += 0.15
+    return min(score, 1.0)
+
 def classify_text(text, threshold=_DEFAULT_THRESHOLD):
     features = {
         'base64': _detect_base64(text),
@@ -302,6 +317,11 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         'entropy': _compute_entropy(text),
         'zero_width': _detect_zero_width(text),
     }
+    doc_confidence = _detect_document_context(text)
+    if os.environ.get("ASF_DISABLE_DOC_DAMPENER", "").lower() != "true" and doc_confidence >= 0.4:
+        dampened = {"instruction_lang", "entropy"}
+        for f in dampened:
+            features[f] *= max(0.0, 1.0 - doc_confidence)
     critical = {f: v for f, v in features.items() if v >= 0.7}
     total_w = sum(_FEATURE_WEIGHTS.values())
     score = sum(features[f] * _FEATURE_WEIGHTS[f] for f in features) / total_w
@@ -316,7 +336,7 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         reason = f"Injection risk {score:.2f} [{', '.join(top)}]"
     else:
         reason = ""
-    return ClassifierResult(score=score, features=features, blocked=blocked, reason=reason)
+    return ClassifierResult(score=score, features={**features, "doc_context": doc_confidence}, blocked=blocked, reason=reason)
 
 def _classifier_gate_score(tool_input):
     result = classify_text(tool_input)
