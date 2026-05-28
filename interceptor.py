@@ -18,8 +18,8 @@ POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
 CLASSIFIER_PATH = os.path.join(BASE_DIR, "classifier.pkl")
 
 _RE_SEMANTIC_PROBE = (
-    re.compile(r'\byou are now\b', re.IGNORECASE),
-    re.compile(r'\bact as\b.{0,40}\b(without|ignoring|bypass)', re.IGNORECASE),
+    re.compile(r'\byou are now\b.{0,30}\b(an? |the )?(ai|assistant|bot|agent|character|persona|role)\b', re.IGNORECASE),
+    re.compile(r'\bact (as|like)\b.{0,50}\b(ai|assistant|bot|agent|model|gpt|claude|chatgpt|llm|dan|character|persona)\b', re.IGNORECASE),
     re.compile(r'\bpretend (to be|you are|you\'re)\b', re.IGNORECASE),
     re.compile(r'\broleplay as\b', re.IGNORECASE),
     re.compile(r'\bwithout (any )?(restrictions?|guidelines?|limits?|rules?)\b', re.IGNORECASE),
@@ -30,6 +30,9 @@ _RE_SEMANTIC_PROBE = (
     re.compile(r'\byour (new |actual |real |true )(task|role|instructions?|objective|purpose)\b', re.IGNORECASE),
     re.compile(r'\bdo not (follow|obey|adhere to)\b', re.IGNORECASE),
     re.compile(r'\b(disregard|bypass|circumvent) (your |all |any )?(instructions?|rules?|guidelines?|training)\b', re.IGNORECASE),
+    re.compile(r'\b(reveal|show|print|output|repeat|display|write out).{0,30}\b(system prompt|system message|initial prompt|instructions)\b', re.IGNORECASE),
+    re.compile(r'\b(enable|activate|unlock|turn on).{0,20}\b(developer mode|jailbreak|unrestricted|no.?filter|dan)\b', re.IGNORECASE),
+    re.compile(r'<\|im_(start|end|sep)\|>|<\|system\|>|\[INST\]|\[\/INST\]|<<SYS>>'),
 )
 
 
