@@ -17,6 +17,27 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
 CLASSIFIER_PATH = os.path.join(BASE_DIR, "classifier.pkl")
 
+_RE_SEMANTIC_PROBE = (
+    re.compile(r'\byou are now\b', re.IGNORECASE),
+    re.compile(r'\bact as\b.{0,40}\b(without|ignoring|bypass)', re.IGNORECASE),
+    re.compile(r'\bpretend (to be|you are|you\'re)\b', re.IGNORECASE),
+    re.compile(r'\broleplay as\b', re.IGNORECASE),
+    re.compile(r'\bwithout (any )?(restrictions?|guidelines?|limits?|rules?)\b', re.IGNORECASE),
+    re.compile(r'\bignore (your )?(previous |prior )?(instructions?|training|guidelines?|rules?|prompt)\b', re.IGNORECASE),
+    re.compile(r'\bforget (your |all )?(previous |prior )?(instructions?|training|guidelines?|rules?)\b', re.IGNORECASE),
+    re.compile(r'\boverride (your )?(instructions?|system|guidelines?)\b', re.IGNORECASE),
+    re.compile(r'\b(from now on|starting now)[,\s].{0,60}(you (are|will|should|must)|your (task|role|job))\b', re.IGNORECASE),
+    re.compile(r'\byour (new |actual |real |true )(task|role|instructions?|objective|purpose)\b', re.IGNORECASE),
+    re.compile(r'\bdo not (follow|obey|adhere to)\b', re.IGNORECASE),
+    re.compile(r'\b(disregard|bypass|circumvent) (your |all |any )?(instructions?|rules?|guidelines?|training)\b', re.IGNORECASE),
+)
+
+
+def _semantic_probe(text: str) -> bool:
+    if os.environ.get("ASF_DISABLE_SEMANTIC_PROBE", "").lower() == "true":
+        return False
+    return any(pattern.search(text) for pattern in _RE_SEMANTIC_PROBE)
+
 
 def _select_auditor():
     if os.environ.get("ASF_AGT_AUDIT", "").lower() != "true":
@@ -246,6 +267,19 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
         return "DENY", f"BLOCKED by heuristic (score={heuristic_score:.2f})"
 
     if heuristic_score <= HEURISTIC_CLEAR_THRESHOLD and not os.environ.get("ASF_ALWAYS_STAGE25", "").lower() == "true":
+        if _semantic_probe(tool_input):
+            AUDITOR.log_event(
+                agent_id,
+                tool_name,
+                "SEMANTIC_PROBE_ESCALATE",
+                f"Semantic probe triggered on heuristic-clear candidate (score={heuristic_score:.2f}), escalating to pipeline",
+                trace_id=trace_id,
+                latency_ms=latency_ms(),
+                session_id=session_id,
+            )
+            print(f"[FASTPATH] Semantic probe triggered (L1.5={heuristic_score:.2f}), skipping fast-path clear", file=sys.stderr)
+            _FASTPATH_STATS["ML_INVOKED"] += 1
+            return None
         _FASTPATH_STATS["HEURISTIC_CLEAR"] += 1
         AUDITOR.log_event(
             agent_id,
@@ -358,6 +392,7 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
     stage25_enabled = os.environ.get("ASF_DISABLE_STAGE25", "").lower() != "true"
     always_stage25 = os.environ.get("ASF_ALWAYS_STAGE25", "").lower() == "true"
     soft_escalate = False
+    semantic_escalate = False
 
     if verdict == "SAFE":
         if os.environ.get("ASF_ALWAYS_LLM", "").lower() == "true":
@@ -374,6 +409,14 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
             AUDITOR.log_event(
                 agent_id, tool_name, "STAGE_2_SOFT_ESCALATE",
                 "Stage2 SAFE but ASF_ALWAYS_STAGE25 active, escalating to Stage2.5",
+                trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
+            )
+        elif stage25_enabled and _semantic_probe(tool_input):
+            soft_escalate = True
+            semantic_escalate = True
+            AUDITOR.log_event(
+                agent_id, tool_name, "STAGE_2_SOFT_ESCALATE",
+                "Stage2 SAFE but semantic probe active, escalating to Stage2.5",
                 trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
             )
         elif stage25_enabled and SOFT_THRESHOLD > 0 and l15_score > SOFT_THRESHOLD:
@@ -394,6 +437,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         print(f"[STAGE 2] Classifier uncertain ({confidence:.2f}), escalating to Stage 2.5.", file=__import__("sys").stderr)
     elif always_stage25:
         print(f"[STAGE 2] ASF_ALWAYS_STAGE25 active, escalating to Stage 2.5.", file=__import__("sys").stderr)
+    elif semantic_escalate:
+        print("[STAGE 2] SAFE but semantic probe active, escalating to Stage 2.5.", file=__import__("sys").stderr)
     else:
         print(f"[STAGE 2] SAFE with L1.5 score {l15_score:.2f}, escalating to Stage 2.5.", file=__import__("sys").stderr)
 
