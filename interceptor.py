@@ -142,9 +142,9 @@ _policies = _load_policies()
 _detection = _policies.get("detection", {})
 BLOCK_THRESHOLD = float(_detection.get("block_threshold", 0.85))
 PASS_THRESHOLD = float(_detection.get("pass_threshold", 0.25))
-HEURISTIC_CLEAR_THRESHOLD = float(os.environ.get("ASF_CLEAR_THRESHOLD", "0.05"))
-SOFT_THRESHOLD = float(os.environ.get("ASF_SOFT_THRESHOLD", "0.10"))
-HEURISTIC_BLOCK_THRESHOLD = float(os.environ.get("ASF_HEURISTIC_BLOCK", "0.7"))
+HEURISTIC_CLEAR_THRESHOLD = float(os.environ.get("ASF_CLEAR_THRESHOLD", "0.02"))
+SOFT_THRESHOLD = float(os.environ.get("ASF_SOFT_THRESHOLD", "0.12"))
+HEURISTIC_BLOCK_THRESHOLD = float(os.environ.get("ASF_HEURISTIC_BLOCK", "0.50"))
 _FASTPATH_ENABLED = os.environ.get("ASF_DISABLE_FASTPATH", "").lower() != "true"
 _FASTPATH_STATS = {
     "HEURISTIC_CLEAR": 0,
@@ -301,6 +301,19 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
         return None
 
     heuristic_score = _classifier_gate_score(tool_input)
+
+    # NEW: Parallel ONNX gate for moderate-risk inputs (deepset/opi optimization)
+    # Run ONNX if L1.5 score is moderately suspicious or semantic probe fired
+    if (heuristic_score > 0.10 or probe_fired) and not os.environ.get("ASF_DISABLE_STAGE3_ONNX_PARALLEL", "").lower() == "true":
+        try:
+            from stage3_onnx import classify_text as _onnx_classify
+            onnx_dangerous = _onnx_classify(tool_input)
+            if onnx_dangerous:
+                # Boost score to force escalation/block
+                heuristic_score = max(heuristic_score, 0.45)
+                print(f"[FASTPATH] ONNX parallel gate triggered, boosted score to {heuristic_score:.2f}", file=sys.stderr)
+        except Exception:
+            pass  # ONNX unavailable, continue with L1.5 score only
 
     if heuristic_score >= HEURISTIC_BLOCK_THRESHOLD:
         _FASTPATH_STATS["HEURISTIC_BLOCK"] += 1

@@ -50,7 +50,27 @@ _RE_KNOWN_PAYLOADS = (
     (re.compile(r'ignore .{0,30}instructions'), 0.75),
     (re.compile(r'ignore .{0,10}rules'), 0.72),
     (re.compile(r'new (?:task|instructions?|objective)'), 0.4),
-    (re.compile(r'drop\s+table'), 0.9),
+    (re.compile(r'drop\\s+table'), 0.9),
+    # Direct identity assignment (deepset/opi focus)
+    (re.compile(r'\bnow you are\b.{0,30}\b(?:[A-Z][a-z]+|an? [A-Z])'), 0.75),
+    (re.compile(r'^you are\b.{0,30}\b(?:an? |the )?(?:[A-Z][a-z]+)'), 0.7),
+    (re.compile(r'\byou are\b.{0,30}\b(?:[A-Z][a-z]+).*\?'), 0.65),
+    # Fictional framing
+    (re.compile(r'(?:film|movie|scene).{0,60}(?:actor|character).{0,40}(?:asks?|says?)'), 0.7),
+    (re.compile(r'(?:actors|people).{0,80}(?:in their roles|stay in character)'), 0.6),
+    (re.compile(r'(?:master thief|hacker|expert).{0,30}asks?'), 0.7),
+    # Praise + pivot
+    (re.compile(r'(?:excellent|great|well done).{0,30}\bnow\b'), 0.5),
+    (re.compile(r'\bthat is enough\b.{0,30}\bnow\b'), 0.6),
+    (re.compile(r'\byou\'ve outdone\b'), 0.5),
+    # German injection keywords
+    (re.compile(r'\bvergiss\b.{0,30}\b(?:aufgaben|befehle|instruktionen)\b', re.IGNORECASE), 0.8),
+    (re.compile(r'\bstell dir vor\b.{0,30}\bbist\b', re.IGNORECASE), 0.7),
+    (re.compile(r'\bich möchte, dass sie\b.{0,30}\bfungieren\b', re.IGNORECASE), 0.7),
+    (re.compile(r'\bignoriere\b.{0,30}\b(?:anweisungen|befehle|regeln)\b', re.IGNORECASE), 0.75),
+    # Translation exploitation
+    (re.compile(r'\bexploiting (?:AI|this system)\b', re.IGNORECASE), 0.8),
+    (re.compile(r'(?:input|output).{0,15}(?:input|output).{0,15}(?:input|output)'), 0.5),
 )
 _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:print|output|say|echo|write|return)\s+["\']'),
@@ -153,6 +173,11 @@ _FEATURE_WEIGHTS = {
     "instruction_lang": 0.15, "entropy": 0.10,
     "sensitive_file_abuse": 0.25, "zero_width": 1.0,
 }
+
+# Thresholds for heuristic fast-path (deepset/opi optimized)
+_HEURISTIC_BLOCK = float(os.environ.get("ASF_HEURISTIC_BLOCK", "0.50"))
+_HEURISTIC_CLEAR = float(os.environ.get("ASF_CLEAR_THRESHOLD", "0.02"))
+_SOFT_THRESHOLD = float(os.environ.get("ASF_SOFT_THRESHOLD", "0.12"))
 
 def _strip_zero_width(text: str) -> tuple[str, bool]:
     found = False
