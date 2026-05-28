@@ -35,42 +35,42 @@ _RE_STRUCTURAL_CHAT_TOKEN = re.compile(
     re.IGNORECASE,
 )
 _RE_STRUCTURAL_LONG_DELIMITER = re.compile(r'[-=]{10,}')
+_I = re.IGNORECASE
 _RE_KNOWN_PAYLOADS = (
-    (re.compile(r'you are (?:now )?(?:DAN|DUDE)'), 0.9),
-    (re.compile(r'act as (?:DAN|DUDE)'), 0.9),
-    (re.compile(r'developer mode (?:enabled|activated)'), 0.9),
-    (re.compile(r'broken free of .* confines'), 0.7),
-    (re.compile(r'submissive ai'), 0.8),
-    (re.compile(r'this prompt has been.*hijacked'), 0.9),
-    (re.compile(r'pass (?:its|the) content as .?sidenote'), 0.9),
-    (re.compile(r'stop everything.*now.*(?:print|say|output)'), 0.8),
-    (re.compile(r'your (?:new |real |actual )task'), 0.65),
-    (re.compile(r'disregard (?:all )?(?:previous|prior)'), 0.65),
-    (re.compile(r'ignore (?:all )?(?:previous|prior) (?:instructions?|rules)'), 0.75),
-    (re.compile(r'ignore .{0,30}instructions'), 0.75),
-    (re.compile(r'ignore .{0,10}rules'), 0.72),
-    (re.compile(r'new (?:task|instructions?|objective)'), 0.4),
-    (re.compile(r'drop\s+table', re.IGNORECASE), 0.9),
-    # Direct identity assignment (deepset/opi focus)
-    (re.compile(r'\bnow you are\b.{0,30}\b(?:[A-Z][a-z]+|an? [A-Z])'), 0.75),
-    (re.compile(r'^you are\b.{0,30}\b(?:an? |the )?(?:[A-Z][a-z]+)'), 0.7),
-    (re.compile(r'\byou are\b.{0,30}\b(?:[A-Z][a-z]+).*\?'), 0.65),
+    (re.compile(r'you are (?:now )?(?:dan|dude)\b', _I), 0.9),
+    (re.compile(r'act as (?:dan|dude)\b', _I), 0.9),
+    (re.compile(r'developer mode (?:enabled|activated)', _I), 0.9),
+    (re.compile(r'broken free of .* confines', _I), 0.7),
+    (re.compile(r'submissive ai', _I), 0.8),
+    (re.compile(r'this prompt has been.*hijacked', _I), 0.9),
+    (re.compile(r'pass (?:its|the) content as .?sidenote', _I), 0.9),
+    (re.compile(r'stop everything.*now.*(?:print|say|output)', _I), 0.8),
+    (re.compile(r'your (?:new |real |actual )task', _I), 0.65),
+    (re.compile(r'disregard (?:all )?(?:previous|prior)', _I), 0.65),
+    (re.compile(r'ignore (?:all )?(?:previous|prior) (?:instructions?|rules)', _I), 0.75),
+    (re.compile(r'ignore .{0,30}instructions', _I), 0.75),
+    (re.compile(r'ignore .{0,10}rules', _I), 0.72),
+    (re.compile(r'new (?:task|instructions?|objective)', _I), 0.4),
+    (re.compile(r'drop\s+table', _I), 0.9),
+    # Direct identity assignment — case-insensitive, no capitalization heuristic
+    (re.compile(r'\bnow you are\b.{0,30}\ban? \w{3,}', _I), 0.6),
+    (re.compile(r'\byou are\b.{0,30}\b(?:an? |the )(?:ai|assistant|bot|agent|character|persona|hacker|system|gpt|claude|llama|dan|dude)\b', _I), 0.75),
     # Fictional framing
-    (re.compile(r'(?:film|movie|scene).{0,60}(?:actor|character).{0,40}(?:asks?|says?)'), 0.7),
-    (re.compile(r'(?:actors|people).{0,80}(?:in their roles|stay in character)'), 0.6),
-    (re.compile(r'(?:master thief|hacker|expert).{0,30}asks?'), 0.7),
+    (re.compile(r'(?:film|movie|scene).{0,60}(?:actor|character).{0,40}(?:asks?|says?)', _I), 0.7),
+    (re.compile(r'(?:actors|people).{0,80}(?:in their roles|stay in character)', _I), 0.6),
+    (re.compile(r'(?:master thief|hacker|expert).{0,30}asks?', _I), 0.7),
     # Praise + pivot
-    (re.compile(r'(?:excellent|great|well done).{0,30}\bnow\b'), 0.5),
-    (re.compile(r'\bthat is enough\b.{0,30}\bnow\b'), 0.6),
-    (re.compile(r'\byou\'ve outdone\b'), 0.5),
+    (re.compile(r'(?:excellent|great|well done).{0,30}\bnow\b', _I), 0.5),
+    (re.compile(r'\bthat is enough\b.{0,30}\bnow\b', _I), 0.6),
+    (re.compile(r'\byou\'ve outdone\b', _I), 0.5),
     # German injection keywords
-    (re.compile(r'\bvergiss\b.{0,30}\b(?:vorherigen?|bisherigen?|deine)\b.{0,20}\b(?:aufgaben|befehle|instruktionen|anweisungen)\b', re.IGNORECASE), 0.8),
-    (re.compile(r'\bstell dir vor\b.{0,30}\bdu bist\b', re.IGNORECASE), 0.7),
-    (re.compile(r'\bich möchte, dass sie\b.{0,30}\b(?:als|wie)\b.{0,30}\bfungieren\b', re.IGNORECASE), 0.65),
-    (re.compile(r'\bignoriere\b.{0,30}\b(?:anweisungen|befehle|regeln)\b', re.IGNORECASE), 0.75),
+    (re.compile(r'\bvergiss\b.{0,30}\b(?:vorherigen?|bisherigen?|deine)\b.{0,20}\b(?:aufgaben|befehle|instruktionen|anweisungen)\b', _I), 0.8),
+    (re.compile(r'\bstell dir vor\b.{0,30}\bdu bist\b', _I), 0.7),
+    (re.compile(r'\bich möchte, dass sie\b.{0,30}\b(?:als|wie)\b.{0,30}\bfungieren\b', _I), 0.65),
+    (re.compile(r'\bignoriere\b.{0,30}\b(?:anweisungen|befehle|regeln)\b', _I), 0.75),
     # Translation exploitation
-    (re.compile(r'\bexploiting (?:AI|this system)\b', re.IGNORECASE), 0.8),
-    (re.compile(r'(?:input|output).{0,15}(?:input|output).{0,15}(?:input|output)'), 0.5),
+    (re.compile(r'\bexploiting (?:AI|this system)\b', _I), 0.8),
+    (re.compile(r'(?:input|output).{0,15}(?:input|output).{0,15}(?:input|output)', _I), 0.5),
 )
 _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:print|output|say|echo|write|return)\s+["\']'),
@@ -121,28 +121,29 @@ _SPOTLIGHT_INSTRUCTION = (
 )
 _CANARY_TEMPLATE = " [ref:{canary}] "
 _MIN_CANARY_LENGTH = 100
-ZERO_WIDTH_CHARS = frozenset([
-    # Original set
-    '\u200b',  # Zero Width Space
-    '\u200c',  # Zero Width Non-Joiner
-    '\u200d',  # Zero Width Joiner
-    '\ufeff',  # BOM / Zero Width No-Break Space
-    '\u2060',  # Word Joiner
-    '\u00ad',  # Soft Hyphen
-    # Directional controls
-    '\u202a',  # Left-to-Right Embedding
-    '\u202b',  # Right-to-Left Embedding
-    '\u202c',  # Pop Directional Formatting
-    '\u202d',  # Left-to-Right Override
-    '\u202e',  # Right-to-Left Override
-    '\u2066',  # Left-to-Right Isolate
-    '\u2067',  # Right-to-Left Isolate
-    '\u2068',  # First Strong Isolate
-    '\u2069',  # Pop Directional Isolate
-    # Additional zero-width
-    '\u200e',  # Left-to-Right Mark
-    '\u200f',  # Right-to-Left Mark
-    '\u061c',  # Arabic Letter Mark
+# Critical: only appear in attacks or adversarial obfuscation \u2014 weight 1.0
+ZERO_WIDTH_CHARS_CRITICAL = frozenset([
+    '\u200b',  # Zero Width Space (word-splitting attacks)
+    '\u2060',  # Word Joiner (obfuscation)
+    '\u00ad',  # Soft Hyphen (keyword splitting)
+    '\ufeff',  # BOM mid-text (anomalous if not at start)
+    '\u202a',  # LRE \u2014 bidi override
+    '\u202b',  # RLE \u2014 bidi override
+    '\u202c',  # PDF \u2014 bidi override
+    '\u202d',  # LRO \u2014 bidi override
+    '\u202e',  # RLO \u2014 bidi override (text reversal attacks)
+    '\u2066',  # LRI \u2014 bidi isolate
+    '\u2067',  # RLI \u2014 bidi isolate
+    '\u2068',  # FSI \u2014 bidi isolate
+    '\u2069',  # PDI \u2014 bidi isolate
+])
+# Soft: legitimately appear in Arabic/Hebrew/Persian/Indic/Hangul/emoji text \u2014 weight 0.3
+ZERO_WIDTH_CHARS_SOFT = frozenset([
+    '\u200c',  # ZWNJ \u2014 Persian, Indic orthography
+    '\u200d',  # ZWJ  \u2014 Arabic shaping, compound emoji
+    '\u200e',  # LRM  \u2014 Arabic/Hebrew bidi
+    '\u200f',  # RLM  \u2014 Arabic/Hebrew bidi
+    '\u061c',  # ALM  \u2014 Arabic Letter Mark
     '\u115f',  # Hangul Choseong Filler
     '\u1160',  # Hangul Jungseong Filler
     '\u17b4',  # Khmer Vowel Inherent Aq
@@ -150,6 +151,7 @@ ZERO_WIDTH_CHARS = frozenset([
     '\u3164',  # Hangul Filler
     '\uffa0',  # Halfwidth Hangul Filler
 ])
+ZERO_WIDTH_CHARS = ZERO_WIDTH_CHARS_CRITICAL | ZERO_WIDTH_CHARS_SOFT
 ZERO_WIDTH_RANGES = [
     (0x0000, 0x0008),   # Null and C0 controls (SOH-BS), excluding tab/LF/VT/FF/CR
     (0x000E, 0x001F),   # SO–SI and remaining C0 controls (DLE–US)
@@ -195,8 +197,16 @@ def _strip_zero_width(text: str) -> tuple[str, bool]:
     return ''.join(cleaned), found
 
 def _detect_zero_width(text: str) -> float:
-    _, found = _strip_zero_width(text)
-    return 1.0 if found else 0.0
+    for ch in text:
+        if ch in ZERO_WIDTH_CHARS_CRITICAL:
+            return 1.0
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in ZERO_WIDTH_RANGES):
+            return 1.0
+    for ch in text:
+        if ch in ZERO_WIDTH_CHARS_SOFT:
+            return 0.3
+    return 0.0
 
 def _normalize_unicode(text: str) -> tuple[str, bool]:
     normalized = unicodedata.normalize('NFKC', text)
@@ -284,9 +294,10 @@ def _detect_structural_markers(text):
     if _RE_STRUCTURAL_CLOSE_TAG.search(text): score += 0.3
     if _RE_STRUCTURAL_ROLE_BRACKET.search(text): score += 0.4
     if _RE_STRUCTURAL_CHAT_TOKEN.search(text): score += 0.5
-    delimiter_matches = _RE_STRUCTURAL_LONG_DELIMITER.findall(text)
-    if delimiter_matches:
-        score += min(0.3 * len(delimiter_matches), 0.6)
+    if score > 0:  # only score delimiters when another structural signal is already present
+        delimiter_matches = _RE_STRUCTURAL_LONG_DELIMITER.findall(text)
+        if delimiter_matches:
+            score += min(0.2 * len(delimiter_matches), 0.4)
     return min(score, 1.0)
 
 def _detect_unicode_anomalies(text):
@@ -302,8 +313,7 @@ def _detect_unicode_anomalies(text):
     return 0.0
 
 def _detect_known_payloads(text):
-    text_lower = text.lower()
-    return max((w for pattern, w in _RE_KNOWN_PAYLOADS if pattern.search(text_lower)), default=0.0)
+    return max((w for pattern, w in _RE_KNOWN_PAYLOADS if pattern.search(text)), default=0.0)
 
 def _detect_instruction_language(text):
     text_lower = text.lower()
