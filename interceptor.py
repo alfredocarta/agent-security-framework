@@ -570,13 +570,19 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         except Exception as exc:
             print(f"[STAGE 2.5] DeBERTa error: {exc}", file=sys.stderr)
 
-    AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_UNCERTAIN", "DeBERTa uncertain, escalating to Stage 3",
+    if not stage25_enabled:
+        _stage3_reason = "Stage 2.5 disabled (ASF_DISABLE_STAGE25=true), escalating to Stage 3"
+        _stage3_event  = "STAGE_2.5_SKIPPED"
+    else:
+        _stage3_reason = "DeBERTa uncertain or unavailable, escalating to Stage 3"
+        _stage3_event  = "STAGE_2.5_UNCERTAIN"
+    AUDITOR.log_event(agent_id, tool_name, _stage3_event, _stage3_reason,
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
     if _STAGE3_BACKEND == "openrouter":
         model_name = os.environ.get("ASF_OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct")
-        print(f"[STAGE 2.5] DeBERTa uncertain, escalating to Stage 3 OPENROUTER ({model_name}).", file=__import__("sys").stderr)
+        print(f"[STAGE 3] {_stage3_reason} → OPENROUTER ({model_name}).", file=__import__("sys").stderr)
     else:
-        print(f"[STAGE 2.5] DeBERTa uncertain, escalating to Stage 3 {_STAGE3_BACKEND.upper()}.", file=__import__("sys").stderr)
+        print(f"[STAGE 3] {_stage3_reason} → {_STAGE3_BACKEND.upper()}.", file=__import__("sys").stderr)
 
     if _STAGE3_BACKEND == "onnx":
         AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "ONNX Prompt Guard analysis",
