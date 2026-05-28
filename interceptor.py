@@ -39,8 +39,8 @@ _RE_SEMANTIC_PROBE = (
     re.compile(r'\bnow you are\b\s{0,5}\b[a-zA-Z]', re.IGNORECASE),
     re.compile(r'^you are\s{0,5}(?:an? |the )?(?:[A-Z][a-z]+)', re.IGNORECASE),
     re.compile(r'\byou are\s{0,5}(?:an? |the )?(?:[A-Z][a-z]+).*\?', re.IGNORECASE),
-    # Fictional framing / indirect role assumption
-    re.compile(r'(?:film|movie|scene|play).{0,50}(?:actor|character|role).{0,50}(?:asks?|says?|speaks?)', re.IGNORECASE),
+    # Fictional framing / indirect role assumption (any order)
+    re.compile(r'(?:film|movie|scene|play|actor|character|role).{0,80}(?:asks?|says?|speaks?|in their roles|stay in character)', re.IGNORECASE),
     re.compile(r'(?:two people|actors).{0,80}(?:in their roles|stay in character|breaking character)', re.IGNORECASE),
     re.compile(r'(?:character|person).{0,30}is (?:the |a )?(?:master|hacker|thief|expert).{0,30}(?:asks?|says?)', re.IGNORECASE),
     # Praise + pivot patterns
