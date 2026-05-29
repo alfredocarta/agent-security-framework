@@ -566,19 +566,29 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         try:
             AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5_START", "DeBERTa fast gate",
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-            from stage25_deberta import classify_text as _stage25_classify
-            stage25_verdict = _stage25_classify(tool_input)
+            from stage25_deberta import classify_text_scored as _stage25_classify
+            stage25_verdict, stage25_score = _stage25_classify(tool_input)
             AUDITOR.log_event(agent_id, tool_name, "STAGE_2.5A_VERDICT",
                               f"DeBERTa verdict: {stage25_verdict}",
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
             print(f"[STAGE 2.5] DeBERTa verdict: {stage25_verdict}", file=sys.stderr)
 
             if stage25_verdict == "DANGEROUS":
-                registry.suspend_agent(agent_id)
-                AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
-                                  "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)",
-                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-                return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)."
+                confirm_required = os.environ.get("ASF_STAGE25_CONFIRM_REQUIRED", "").lower() != "false"
+                always_only = always_stage25 and not probe_fired and l15_score <= SOFT_THRESHOLD
+                if confirm_required and always_only:
+                    AUDITOR.log_event(
+                        agent_id, tool_name, "STAGE_2.5_UNCONFIRMED",
+                        "Always-Stage25 DANGEROUS without L1.5/probe confirmation — routing to Stage 2.5b",
+                        trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                        metadata={"deberta_injection_score": stage25_score},
+                    )
+                else:
+                    registry.suspend_agent(agent_id)
+                    AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
+                                      "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)",
+                                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                    return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)."
 
             if stage25_verdict == "SAFE":
                 AUDITOR.log_event(agent_id, tool_name, "ALLOWED",

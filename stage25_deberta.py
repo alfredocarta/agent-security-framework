@@ -33,21 +33,21 @@ def warm_up():
         print("[STAGE 2.5] DeBERTa warm-up complete", file=sys.stderr)
 
 
-def classify(tool_input: str) -> str:
+def _classify_scored(tool_input: str) -> tuple[str, float]:
     """
-    Returns "DANGEROUS", "SAFE", or "UNCERTAIN".
+    Returns ("DANGEROUS" | "SAFE" | "UNCERTAIN", injection_probability).
     Strips spotlighting ^ prefix before classification since DeBERTa
     is sensitive to those markers.
     Enabled by default. Set ASF_DISABLE_STAGE25=true to disable.
     """
     if os.environ.get("ASF_DISABLE_STAGE25", "").lower() == "true":
-        return "UNCERTAIN"
+        return "UNCERTAIN", 0.0
     if os.environ.get("ASF_SKIP_STAGE25", "").lower() == "true":
-        return "UNCERTAIN"
+        return "UNCERTAIN", 0.0
     try:
         model = _get_model()
         if model is None:
-            return "UNCERTAIN"
+            return "UNCERTAIN", 0.0
         # Strip spotlight markers and L1.5 canary references so DeBERTa
         # sees the same clean text whether called directly or via hardened_interceptor.
         clean = re.sub(r'\^', '', tool_input)
@@ -66,18 +66,31 @@ def classify(tool_input: str) -> str:
         result = model(clean)
         label = result[0]['label']
         score = result[0]['score']
+        injection_score = score if label == "INJECTION" else 1.0 - score
         if label == "INJECTION" and score > 0.7:
-            return "DANGEROUS"
+            return "DANGEROUS", injection_score
         elif label == "LEGIT" and score > 0.85:
-            return "SAFE"
-        return "UNCERTAIN"
+            return "SAFE", injection_score
+        return "UNCERTAIN", injection_score
     except Exception as e:
         print(f"[STAGE 2.5] Error: {e}", file=sys.stderr)
-        return "UNCERTAIN"
+        return "UNCERTAIN", 0.0
+
+
+def classify(tool_input: str) -> str:
+    """
+    Returns "DANGEROUS", "SAFE", or "UNCERTAIN".
+    """
+    verdict, _ = _classify_scored(tool_input)
+    return verdict
 
 
 def classify_text(text: str) -> str:
     return classify(text)
+
+
+def classify_text_scored(text: str) -> tuple[str, float]:
+    return _classify_scored(text)
 
 
 try:
