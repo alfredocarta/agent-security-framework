@@ -14,9 +14,13 @@ def _get_model():
     global _MODEL
     if _MODEL is None:
         from transformers import pipeline
+        model_name_or_path = os.environ.get(
+            "ASF_STAGE25_MODEL",
+            "deepset/deberta-v3-base-injection",
+        )
         _MODEL = pipeline(
             "text-classification",
-            model="deepset/deberta-v3-base-injection",
+            model=model_name_or_path,
             device=-1
         )
     return _MODEL
