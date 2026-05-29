@@ -575,7 +575,10 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
 
             if stage25_verdict == "DANGEROUS":
                 confirm_required = os.environ.get("ASF_STAGE25_CONFIRM_REQUIRED", "").lower() != "false"
-                always_only = always_stage25 and not probe_fired and l15_score <= SOFT_THRESHOLD
+                # soft_escalate=True means Stage 2 was SAFE and we were forced here by
+                # always_stage25/probe/soft_threshold. soft_escalate=False means Stage 2
+                # was naturally UNCERTAIN — in that case trust DeBERTa even in Always mode.
+                always_only = always_stage25 and soft_escalate and not probe_fired and l15_score <= SOFT_THRESHOLD
                 if confirm_required and always_only:
                     AUDITOR.log_event(
                         agent_id, tool_name, "STAGE_2.5_UNCONFIRMED",
