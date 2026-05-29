@@ -84,11 +84,20 @@ _RE_INSTRUCTION_LANGUAGE = (
     re.compile(r'(?:send|forward|redirect)\s+(?:all|the|every)'),
     re.compile(r'(?:execute|run|eval)\s+(?:the|this|following)'),
 )
+_SENSITIVE_PATHS = (
+    r'/etc/shadow', r'/etc/passwd', r'/etc/hosts', r'/proc/self/environ',
+    r'id_rsa', r'id_rsa\.pub', r'~/.ssh', r'/root/',
+    r'~/\.aws/credentials', r'\.env\b', r'\.aws/credentials',
+    r'/var/run/secrets',  # Kubernetes service account tokens
+)
+_SENSITIVE_PATH_RE = '(?:' + '|'.join(_SENSITIVE_PATHS) + ')'
+_EXFIL_VERBS = r'\b(?:curl|wget|exfiltrate|send|upload|post|fetch)\b'
+_READ_VERBS = r'\b(?:cat|less|more|open|read|type|get)\b'
 _RE_SENSITIVE_FILE_ABUSE = (
-    re.compile(r'\bsudo\b.*\b(?:cat|less|more|open|read)\b.*(?:/etc/shadow|/etc/passwd|ssh|id_rsa)', re.IGNORECASE),
-    re.compile(r'\b(?:cat|less|more|open|read)\b\s+(?:/etc/shadow|/etc/passwd|~/.ssh|/root/)', re.IGNORECASE),
-    re.compile(r'(?:/etc/shadow|/etc/passwd|id_rsa).*\b(?:curl|wget|exfiltrate|send|upload)\b', re.IGNORECASE),
-    re.compile(r'\b(?:curl|wget|exfiltrate|send|upload)\b.*(?:/etc/shadow|/etc/passwd|id_rsa)', re.IGNORECASE),
+    re.compile(rf'\bsudo\b.*{_READ_VERBS}.*{_SENSITIVE_PATH_RE}', re.IGNORECASE),
+    re.compile(rf'{_READ_VERBS}\s+{_SENSITIVE_PATH_RE}', re.IGNORECASE),
+    re.compile(rf'{_SENSITIVE_PATH_RE}.*{_EXFIL_VERBS}', re.IGNORECASE),
+    re.compile(rf'{_EXFIL_VERBS}.*{_SENSITIVE_PATH_RE}', re.IGNORECASE),
 )
 _RE_HEX_STRIP_PREFIX_AND_SPACE = re.compile(r"0x|\s")
 _RE_ENCODING_REQUEST = re.compile(
@@ -296,11 +305,12 @@ def _detect_rot13(text):
         if m:
             try:
                 decoded = codecs.decode(m.group(1), 'rot_13')
-                if any(w in decoded.lower() for w in ['ignore','print','output','execute','system']):
-                    return 1.0
+                dl = decoded.lower()
+                if any(w in dl for w in _BASE64_ATTACK_WORDS):
+                    return 0.65  # not alone-critical, consistent with base64 treatment
             except Exception:
                 pass
-        return 0.5
+        return 0.5  # marker present but no decodable payload — informational
     rot13_sigs = ["Vtaber", "Sbetrg", "Qvfertneq", "Olapnff", "Qvfnoyr", "Bireeevqr"]
     if any(sig in text for sig in rot13_sigs):
         return 0.55
@@ -335,7 +345,9 @@ def _detect_known_payloads(text):
 
 def _detect_instruction_language(text):
     text_lower = text.lower()
-    return min(sum(1 for pattern in _RE_INSTRUCTION_LANGUAGE if pattern.search(text_lower)) * 0.3, 1.0)
+    # Cap at 0.65: instruction_lang should never be alone-critical. Legitimate developer
+    # tool calls (open file, run command, send output) can match 3-4 patterns innocently.
+    return min(sum(1 for pattern in _RE_INSTRUCTION_LANGUAGE if pattern.search(text_lower)) * 0.3, 0.65)
 
 def _detect_sensitive_file_abuse(text):
     return 1.0 if any(pattern.search(text) for pattern in _RE_SENSITIVE_FILE_ABUSE) else 0.0
@@ -373,9 +385,10 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
     }
     doc_confidence = _detect_document_context(text)
     if os.environ.get("ASF_DISABLE_DOC_DAMPENER", "").lower() != "true" and doc_confidence >= 0.7:
-        if not (features.get("known_payloads", 0.0) >= 0.5 or features.get("sensitive_file_abuse", 0.0) >= 0.5 or features.get("instruction_lang", 0.0) >= 0.6):
-            for f in ["instruction_lang", "entropy"]:
-                features[f] *= max(0.5, 1.0 - doc_confidence * 0.5)
+        if not (features.get("known_payloads", 0.0) >= 0.5 or features.get("sensitive_file_abuse", 0.0) >= 0.5 or features.get("instruction_lang", 0.0) > 0.6):
+            damp = max(0.5, 1.0 - doc_confidence * 0.5)
+            for f in ["instruction_lang", "entropy", "structural", "base64", "rot13"]:
+                features[f] = features.get(f, 0.0) * damp
     critical = {f: v for f, v in features.items() if v >= 0.7}
     total_w = sum(_FEATURE_WEIGHTS.values())
     score = sum(features[f] * _FEATURE_WEIGHTS[f] for f in features) / total_w
