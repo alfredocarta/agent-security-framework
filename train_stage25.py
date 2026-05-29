@@ -144,7 +144,7 @@ def main() -> None:
     set_seed(SEED)
 
     deepset_ds = load_deepset_all()
-    opi_ds = load_opi_stratified(samples_per_label=2000)
+    opi_ds = load_opi_stratified(samples_per_label=500)
     combined = concatenate_datasets([deepset_ds, opi_ds])
 
     print(f"Loaded deepset samples: {len(deepset_ds)}")
@@ -178,8 +178,10 @@ def main() -> None:
         output_dir=str(OUTPUT_DIR),
         num_train_epochs=3,
         learning_rate=2e-5,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=32,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=16,
+        use_mps_device=True,
+        dataloader_pin_memory=False,
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
