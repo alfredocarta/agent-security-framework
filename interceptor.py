@@ -302,32 +302,41 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
 
     heuristic_score = _classifier_gate_score(tool_input)
 
-    # NEW: Parallel ONNX gate for moderate-risk inputs (deepset/opi optimization)
-    # Run ONNX if L1.5 score is moderately suspicious or semantic probe fired
-    # If ONNX fires, make immediate decision (bypass Stage 2 which is unreliable)
-    if (heuristic_score > 0.10 or probe_fired) and not os.environ.get("ASF_DISABLE_STAGE3_ONNX_PARALLEL", "").lower() == "true":
+    # NEW: ONNX as primary detector (deepset/opi optimization)
+    # Run ONNX on ALL inputs unless L1.5 is very confident (block or clear)
+    # This bypasses Stage 2 which has 60-96% FPR on external datasets
+    if not os.environ.get("ASF_DISABLE_STAGE3_ONNX_PARALLEL", "").lower() == "true":
         try:
             from stage3_onnx import classify_text as _onnx_classify
-            onnx_dangerous = _onnx_classify(tool_input)
-            if onnx_dangerous:
-                # ONNX says DANGEROUS - block immediately (Stage 2 is unreliable)
-                AUDITOR.log_event(
-                    agent_id, tool_name, "ONNX_BLOCK",
-                    f"Blocked by ONNX parallel gate (L1.5={heuristic_score:.2f}, probe={probe_fired})",
-                    trace_id=trace_id, latency_ms=latency_ms(), session_id=session_id,
-                )
-                return "DENY", "BLOCKED by ONNX Prompt Guard"
+            
+            # Only skip ONNX if L1.5 is very confident
+            if heuristic_score >= 0.50:
+                # Very confident block - skip ONNX
+                pass
+            elif heuristic_score <= 0.02 and not probe_fired:
+                # Very confident clear with no probe - skip ONNX
+                pass
             else:
-                # ONNX says SAFE - clear if L1.5 also low
-                if heuristic_score <= 0.15 and not probe_fired:
+                # Run ONNX for everything else (most inputs)
+                onnx_dangerous = _onnx_classify(tool_input)
+                if onnx_dangerous:
+                    # ONNX says DANGEROUS - block immediately
+                    AUDITOR.log_event(
+                        agent_id, tool_name, "ONNX_BLOCK",
+                        f"Blocked by ONNX (L1.5={heuristic_score:.2f}, probe={probe_fired})",
+                        trace_id=trace_id, latency_ms=latency_ms(), session_id=session_id,
+                    )
+                    return "DENY", "BLOCKED by ONNX Prompt Guard"
+                else:
+                    # ONNX says SAFE - clear
                     AUDITOR.log_event(
                         agent_id, tool_name, "ONNX_CLEAR",
-                        f"Cleared by ONNX parallel gate (L1.5={heuristic_score:.2f})",
+                        f"Cleared by ONNX (L1.5={heuristic_score:.2f})",
                         trace_id=trace_id, latency_ms=latency_ms(), session_id=session_id,
                     )
                     return "ALLOW", "Cleared by ONNX Prompt Guard"
         except Exception:
-            pass  # ONNX unavailable, continue with L1.5 score only
+            pass  # ONNX unavailable, fall through to L1.5 logic
 
     if heuristic_score >= HEURISTIC_BLOCK_THRESHOLD:
         _FASTPATH_STATS["HEURISTIC_BLOCK"] += 1
