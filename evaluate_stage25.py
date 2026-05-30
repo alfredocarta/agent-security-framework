@@ -44,6 +44,7 @@ def load_deepset_test() -> Dataset:
 
 
 def load_opi_stratified(label: int, total: int = 500) -> Dataset:
+    """Load from the held-out OPI eval partition (sample_id % 5 == 0) only."""
     if not OPI_PATH.exists():
         raise FileNotFoundError(f"OPI dataset not found: {OPI_PATH}")
 
@@ -55,6 +56,9 @@ def load_opi_stratified(label: int, total: int = 500) -> Dataset:
 
     for row in rows:
         intent = row["intent"]
+        sample_id = int(row.get("sample_id", 0))
+        if sample_id % 5 != 0:  # only eval partition
+            continue
         if int(row["label"]) == label and intent in by_intent:
             by_intent[intent].append({"text": row["text"], "label": label, "intent": intent})
 

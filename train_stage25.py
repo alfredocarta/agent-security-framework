@@ -41,15 +41,22 @@ def allocation(total: int, groups: Iterable[str]) -> Dict[str, int]:
     return {group: base + (idx < remainder) for idx, group in enumerate(ordered)}
 
 
-def load_deepset_all() -> Dataset:
-    ds = load_dataset("deepset/prompt-injections")
-    combined = concatenate_datasets([ds["train"], ds["test"]])
-    combined = combined.select_columns(["text", "label"])
-    combined = combined.map(lambda row: {"source": "deepset", "intent": "deepset"})
-    return combined
+def load_deepset_train_only() -> Dataset:
+    """Load only the HuggingFace train split. Test split (116 samples) is held out for eval."""
+    ds = load_dataset("deepset/prompt-injections", split="train")
+    ds = ds.select_columns(["text", "label"])
+    ds = ds.map(lambda row: {"source": "deepset", "intent": "deepset"})
+    return ds
 
 
-def load_opi_stratified(samples_per_label: int = 2000) -> Dataset:
+def load_opi_stratified(samples_per_label: int = 2000, partition: str = "train") -> Dataset:
+    """Load OPI samples from a deterministic partition.
+
+    partition="train"  → sample_id % 5 != 0  (~80% of data, used for training)
+    partition="eval"   → sample_id % 5 == 0  (~20% of data, held out for benchmarking)
+
+    This guarantees no base-text overlap between training and evaluation.
+    """
     if not OPI_PATH.exists():
         raise FileNotFoundError(f"OPI dataset not found: {OPI_PATH}")
 
@@ -64,6 +71,12 @@ def load_opi_stratified(samples_per_label: int = 2000) -> Dataset:
     for row in rows:
         label = int(row["label"])
         intent = row["intent"]
+        sample_id = int(row.get("sample_id", 0))
+        in_eval = sample_id % 5 == 0
+        if partition == "train" and in_eval:
+            continue
+        if partition == "eval" and not in_eval:
+            continue
         if label in (0, 1) and intent in INTENTS:
             by_label_intent[(label, intent)].append(
                 {
@@ -71,6 +84,7 @@ def load_opi_stratified(samples_per_label: int = 2000) -> Dataset:
                     "label": label,
                     "source": "opi",
                     "intent": intent,
+                    "sample_id": sample_id,
                 }
             )
 
@@ -81,7 +95,7 @@ def load_opi_stratified(samples_per_label: int = 2000) -> Dataset:
             bucket = by_label_intent[(label, intent)]
             if len(bucket) < n:
                 raise ValueError(
-                    f"Not enough OPI samples for label={label}, intent={intent}: "
+                    f"Not enough OPI {partition} samples for label={label}, intent={intent}: "
                     f"need {n}, found {len(bucket)}"
                 )
             selected.extend(rng.sample(bucket, n))
@@ -143,12 +157,14 @@ class SplitEvalTrainer(Trainer):
 def main() -> None:
     set_seed(SEED)
 
-    deepset_ds = load_deepset_all()
-    opi_ds = load_opi_stratified(samples_per_label=500)
+    # Use only deepset train split — test split (116 samples) is held out for evaluation.
+    deepset_ds = load_deepset_train_only()
+    # Use only OPI train partition (sample_id % 5 != 0, ~80%) — eval partition is held out.
+    opi_ds = load_opi_stratified(samples_per_label=500, partition="train")
     combined = concatenate_datasets([deepset_ds, opi_ds])
 
-    print(f"Loaded deepset samples: {len(deepset_ds)}")
-    print(f"Loaded OPI samples: {len(opi_ds)}")
+    print(f"Loaded deepset train-only samples: {len(deepset_ds)}")
+    print(f"Loaded OPI train-partition samples: {len(opi_ds)}")
     print(f"Combined samples: {len(combined)}")
 
     train_ds, val_ds = stratified_train_val_split(combined, test_size=0.2)
@@ -160,10 +176,10 @@ def main() -> None:
     def tokenize(batch):
         return tokenizer(batch["text"], truncation=True, max_length=MAX_LENGTH)
 
-    train_tok = train_ds.map(tokenize, batched=True, remove_columns=["text", "source", "intent"])
-    val_tok = val_ds.map(tokenize, batched=True, remove_columns=["text", "source", "intent"])
-    val_deepset_tok = val_deepset.map(tokenize, batched=True, remove_columns=["text", "source", "intent"])
-    val_opi_tok = val_opi.map(tokenize, batched=True, remove_columns=["text", "source", "intent"])
+    train_tok = train_ds.map(tokenize, batched=True, remove_columns=["text", "source", "intent", "sample_id"])
+    val_tok = val_ds.map(tokenize, batched=True, remove_columns=["text", "source", "intent", "sample_id"])
+    val_deepset_tok = val_deepset.map(tokenize, batched=True, remove_columns=["text", "source", "intent", "sample_id"])
+    val_opi_tok = val_opi.map(tokenize, batched=True, remove_columns=["text", "source", "intent", "sample_id"])
 
     model = AutoModelForSequenceClassification.from_pretrained(
         BASE_MODEL,
