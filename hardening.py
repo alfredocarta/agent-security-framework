@@ -341,7 +341,16 @@ def _detect_unicode_anomalies(text):
     return 0.0
 
 def _detect_known_payloads(text):
-    return max((w for pattern, w in _RE_KNOWN_PAYLOADS if pattern.search(text)), default=0.0)
+    matches = [w for pattern, w in _RE_KNOWN_PAYLOADS if pattern.search(text)]
+    if not matches:
+        return 0.0
+    top = max(matches)
+    # If two or more distinct payload families match, apply a combination boost
+    # capped at 1.0. This prevents two 0.65 matches from scoring the same as one.
+    if len(matches) >= 2:
+        second = sorted(matches, reverse=True)[1]
+        top = min(top + second * 0.3, 1.0)
+    return top
 
 def _detect_instruction_language(text):
     text_lower = text.lower()
@@ -397,6 +406,8 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         features.get("known_payloads", 0.0) > 0
         or features.get("zero_width", 0.0) > 0
         or features.get("sensitive_file_abuse", 0.0) > 0
+        or features.get("base64", 0.0) >= 0.65      # decoded attack content
+        or features.get("structural", 0.0) >= 0.5   # role-token / injection tags
     )
     if active >= 2 and has_strong:
         score = min(score * (1 + 0.3 * (active - 1)), 1.0)

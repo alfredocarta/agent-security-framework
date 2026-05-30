@@ -10,14 +10,21 @@ import unicodedata
 
 _MODEL = None
 
+_DEFAULT_MODEL = "deepset/deberta-v3-base-injection"
+
 def _get_model():
     global _MODEL
     if _MODEL is None:
         from transformers import pipeline
-        model_name_or_path = os.environ.get(
-            "ASF_STAGE25_MODEL",
-            "deepset/deberta-v3-base-injection",
-        )
+        model_name_or_path = os.environ.get("ASF_STAGE25_MODEL", "")
+        if not model_name_or_path:
+            print(
+                "[ASF WARNING] ASF_STAGE25_MODEL is not set. Using default model "
+                f"'{_DEFAULT_MODEL}' which has 91% FPR on instruction-format traffic. "
+                "Set ASF_STAGE25_MODEL to the fine-tuned model path for production use.",
+                file=sys.stderr,
+            )
+            model_name_or_path = _DEFAULT_MODEL
         _MODEL = pipeline(
             "text-classification",
             model=model_name_or_path,

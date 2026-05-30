@@ -305,22 +305,21 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
     # NEW: ONNX as primary detector (deepset/opi optimization)
     # Run ONNX on ALL inputs unless L1.5 is very confident (block or clear)
     # This bypasses Stage 2 which has 60-96% FPR on external datasets
-    if not os.environ.get("ASF_DISABLE_STAGE3_ONNX_PARALLEL", "").lower() == "true":
+    # ONNX parallel gate is disabled when ASF_ALWAYS_STAGE25=true to prevent
+    # ONNX SAFE from returning ALLOW before DeBERTa runs.
+    _always_stage25_active = os.environ.get("ASF_ALWAYS_STAGE25", "").lower() == "true"
+    if (not os.environ.get("ASF_DISABLE_STAGE3_ONNX_PARALLEL", "").lower() == "true"
+            and not _always_stage25_active):
         try:
             from stage3_onnx import classify_text as _onnx_classify
-            
-            # Only skip ONNX if L1.5 is very confident
+
             if heuristic_score >= 0.50:
-                # Very confident block - skip ONNX
                 pass
             elif heuristic_score <= 0.02 and not probe_fired:
-                # Very confident clear with no probe - skip ONNX
                 pass
             else:
-                # Run ONNX for everything else (most inputs)
                 onnx_dangerous = _onnx_classify(tool_input)
                 if onnx_dangerous:
-                    # ONNX says DANGEROUS - block immediately
                     AUDITOR.log_event(
                         agent_id, tool_name, "ONNX_BLOCK",
                         f"Blocked by ONNX (L1.5={heuristic_score:.2f}, probe={probe_fired})",
@@ -328,7 +327,6 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
                     )
                     return "DENY", "BLOCKED by ONNX Prompt Guard"
                 else:
-                    # ONNX says SAFE - clear
                     AUDITOR.log_event(
                         agent_id, tool_name, "ONNX_CLEAR",
                         f"Cleared by ONNX (L1.5={heuristic_score:.2f})",
