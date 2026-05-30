@@ -21,7 +21,7 @@ _RE_SEMANTIC_PROBE = (
     re.compile(r'\byou are now\b.{0,30}\b(an? |the )?(ai|assistant|bot|agent|character|persona|role)\b', re.IGNORECASE),
     re.compile(r'\bact (as|like)\b.{0,50}\b(ai|assistant|bot|agent|model|gpt|claude|chatgpt|llm|dan|character|persona)\b', re.IGNORECASE),
     re.compile(r'\bpretend (to be|you are|you\'re)\b', re.IGNORECASE),
-    re.compile(r'\broleplay as\b', re.IGNORECASE),
+    re.compile(r'\broleplay as\b.{0,60}\b(without|ignoring|bypass|uncensored|unrestricted|no rules|dan|jailbreak)\b', re.IGNORECASE),
     re.compile(r'\bwithout (any )?(restrictions?|guidelines?|limits?|rules?)\b', re.IGNORECASE),
     re.compile(r'\bignore (your )?(previous |prior |all |everything )?(instructions?|training|guidelines?|rules?|prompt|above|safety policy|system message)\b', re.IGNORECASE),
     re.compile(r'\bforget (your |all )?(previous |prior )?(instructions?|training|guidelines?|rules?)\b', re.IGNORECASE),
@@ -37,7 +37,7 @@ _RE_SEMANTIC_PROBE = (
     re.compile(r'<\|im_(start|end|sep)\|>|<\|system\|>|\[INST\]|\[\/INST\]|<<SYS>>'),
     # Direct identity assignment (deepset/opi focus)
     re.compile(r'\bnow you are\b\s{0,5}\b[a-zA-Z]', re.IGNORECASE),
-    re.compile(r'^you are\s{0,5}(?:an? |the )?(?:[A-Z][a-z]+)', re.IGNORECASE),
+    re.compile(r'^you are\s{0,5}(?:an? |the )?\w+.{0,120}\b(dan|jailbreak|uncensored|unrestricted|no rules|cannot refuse|do anything|ignore policy|developer mode|content policy|not chatgpt|openai rules)\b', re.IGNORECASE),
     re.compile(r'\byou are\s{0,5}(?:an? |the )?(?:[A-Z][a-z]+).*\?', re.IGNORECASE),
     # Fictional framing / indirect role assumption (any order)
     re.compile(r'(?:film|movie|scene|play|actor|character|role).{0,80}(?:asks?|says?|speaks?|in their roles|stay in character)', re.IGNORECASE),
