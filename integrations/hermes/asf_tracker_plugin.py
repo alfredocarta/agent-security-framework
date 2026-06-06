@@ -8,12 +8,38 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_ASF_ROOT = Path(os.environ.get("ASF_ROOT", "/Users/alfredo/Projects/agent-security-framework"))
+def _resolve_asf_root() -> Path:
+    # 1. Explicit override always wins.
+    env_root = os.environ.get("ASF_ROOT")
+    if env_root:
+        return Path(env_root)
+    # 2. Vendored copy lives at <repo>/integrations/hermes/asf_tracker_plugin.py: walk up
+    #    to the framework root that actually contains the modules, so the in-repo copy is
+    #    portable to any checkout location without ASF_ROOT being set (no hardcoded path).
+    for ancestor in Path(__file__).resolve().parents:
+        if (ancestor / "interceptor.py").exists() and (ancestor / "registry.py").exists():
+            return ancestor
+    # 3. Deployed copy lives outside the repo (e.g. ~/.hermes/plugins): fall back to the
+    #    conventional checkout location.
+    return Path.home() / "Projects" / "agent-security-framework"
+
+
+DEFAULT_ASF_ROOT = _resolve_asf_root()
 # Hermes should use the production Stage 3 backend: ONNX Prompt Guard.
 # Keep setdefault so an explicit user override still wins.
 os.environ.setdefault("ASF_STAGE3_BACKEND", "onnx")
 if str(DEFAULT_ASF_ROOT) not in sys.path:
     sys.path.insert(0, str(DEFAULT_ASF_ROOT))
+if not (DEFAULT_ASF_ROOT / "interceptor.py").exists():
+    # Make misconfiguration loud instead of silently fail-opening: without the framework
+    # modules the ASF check raises and on_pre_tool_call falls back to ALLOW (unless
+    # ASF_HERMES_FAIL_CLOSED=true).
+    print(
+        f"[ASF WARNING] ASF framework modules not found under {DEFAULT_ASF_ROOT}. "
+        "Set ASF_ROOT to the agent-security-framework checkout, otherwise the Hermes ASF "
+        "check will fail-open (set ASF_HERMES_FAIL_CLOSED=true to fail closed).",
+        file=sys.stderr,
+    )
 
 _AGENT_REGISTERED = False
 
