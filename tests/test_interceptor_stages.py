@@ -8,12 +8,12 @@ from tests.conftest import is_blocked, is_allowed, is_hitl
 
 class TestStageThresholds:
     def test_block_threshold_constant(self):
-        # policies.yaml sets 0.95; env var ASF_BLOCK_THRESHOLD can override.
-        # Test that the loaded value is within the valid calibrated range.
+        # block_threshold is loaded from policies.yaml (interceptor.py:143); there is no
+        # env-var override. Test that the loaded value is within the valid calibrated range.
         assert 0.7 <= BLOCK_THRESHOLD <= 1.0, f"Block threshold {BLOCK_THRESHOLD} out of valid range [0.7, 1.0]"
 
     def test_pass_threshold_constant(self):
-        # policies.yaml sets 0.05; env var ASF_PASS_THRESHOLD can override.
+        # pass_threshold is loaded from policies.yaml (interceptor.py:144); no env override.
         assert 0.0 <= PASS_THRESHOLD <= 0.3, f"Pass threshold {PASS_THRESHOLD} out of valid range [0.0, 0.3]"
 
     def test_stage2_dangerous_above_block_threshold(self):
@@ -72,7 +72,8 @@ class TestStageThresholds:
             assert is_blocked(result)
 
     def test_stage3_not_called_when_stage2_is_safe(self):
-        mock_proba = [[0.95, 0.05]]
+        dangerous = max(PASS_THRESHOLD - 0.02, 0.0)
+        mock_proba = [[1.0 - dangerous, dangerous]]
         with patch("interceptor._classifier") as mock_clf:
             with patch("interceptor._stage3_llm") as mock_llm:
                 mock_clf.predict_proba.return_value = mock_proba
@@ -84,7 +85,8 @@ class TestStageThresholds:
         with patch.dict(os.environ, {"ASF_ALWAYS_STAGE25": "true", "ASF_SKIP_LLM": "true"}):
             with patch("interceptor._classifier") as mock_clf:
                 with patch("stage3_onnx.classify_text", return_value="SAFE"):
-                    mock_clf.predict_proba.return_value = [[0.95, 0.05]]  # Stage 2 SAFE
+                    _safe = max(PASS_THRESHOLD - 0.02, 0.0)
+                    mock_clf.predict_proba.return_value = [[1.0 - _safe, _safe]]  # Stage 2 SAFE
                     from interceptor import hardened_interceptor
                     import registry
                     registry.reinstate_agent("billing_agent")
@@ -96,7 +98,8 @@ class TestStageThresholds:
                         "ONNX must not clear input when ASF_ALWAYS_STAGE25=true"
 
     def test_stage3_not_called_when_stage2_is_dangerous(self):
-        mock_proba = [[0.05, 0.95]]
+        dangerous = min(BLOCK_THRESHOLD + 0.04, 1.0)
+        mock_proba = [[1.0 - dangerous, dangerous]]
         with patch("interceptor._classifier") as mock_clf:
             with patch("interceptor._stage3_llm") as mock_llm:
                 mock_clf.predict_proba.return_value = mock_proba
