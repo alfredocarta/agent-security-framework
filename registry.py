@@ -85,3 +85,13 @@ def reinstate_agent(agent_id: str) -> None:
         if agent and agent.status == "suspended":
             agent.status = "active"
             session.commit()
+
+
+def agent_exists(agent_id: str) -> bool:
+    """Return True if the agent is already registered, regardless of status.
+
+    Lets callers register an agent once without resetting an existing row's status
+    (e.g. clearing a kill-switch suspension via add_or_update_agent's status='active').
+    """
+    with SessionLocal() as session:
+        return session.query(AgentModel).filter(AgentModel.agent_id == agent_id).first() is not None

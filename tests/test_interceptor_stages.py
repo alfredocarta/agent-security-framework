@@ -17,42 +17,53 @@ class TestStageThresholds:
         assert 0.0 <= PASS_THRESHOLD <= 0.3, f"Pass threshold {PASS_THRESHOLD} out of valid range [0.0, 0.3]"
 
     def test_stage2_dangerous_above_block_threshold(self):
-        mock_proba = [[0.10, 0.90]]
+        # Derive probabilities from the live thresholds so the tests do not drift when
+        # policies.yaml retunes block_threshold/pass_threshold (e.g. 0.85 -> 0.95).
+        dangerous = min(BLOCK_THRESHOLD + 0.04, 1.0)
+        mock_proba = [[1.0 - dangerous, dangerous]]
         with patch("interceptor._classifier") as mock_clf:
             mock_clf.predict_proba.return_value = mock_proba
             result = security_interceptor("billing_agent", "read_db", "test input")
-            assert is_blocked(result), f"dangerous_proba=0.90 >= 0.85 must be BLOCKED"
+            assert is_blocked(result), f"dangerous_proba={dangerous:.2f} >= {BLOCK_THRESHOLD} must be BLOCKED"
 
     def test_stage2_safe_below_pass_threshold(self):
-        mock_proba = [[0.95, 0.05]]
+        dangerous = max(PASS_THRESHOLD - 0.02, 0.0)
+        mock_proba = [[1.0 - dangerous, dangerous]]
         with patch("interceptor._classifier") as mock_clf:
             mock_clf.predict_proba.return_value = mock_proba
             result = security_interceptor("billing_agent", "read_db", "test input")
-            assert is_allowed(result), f"dangerous_proba=0.05 <= 0.25 must be ALLOWED"
+            assert is_allowed(result), f"dangerous_proba={dangerous:.2f} <= {PASS_THRESHOLD} must be ALLOWED"
 
     def test_stage2_uncertain_in_grey_zone_goes_to_stage3(self):
-        mock_proba = [[0.50, 0.50]]
-        with patch("interceptor._classifier") as mock_clf:
-            with patch("interceptor._stage3_llm") as mock_llm:
-                mock_clf.predict_proba.return_value = mock_proba
-                mock_llm.return_value = True
-                result = security_interceptor("billing_agent", "read_db", "ambiguous input")
-                mock_llm.assert_called_once(), "Stage 3 must be invoked when classifier is uncertain"
-                assert is_hitl(result) or is_blocked(result)
+        dangerous = (PASS_THRESHOLD + BLOCK_THRESHOLD) / 2
+        mock_proba = [[1.0 - dangerous, dangerous]]
+        # A grey-zone Stage 2 verdict now escalates to Stage 2.5 first; disable Stage 2.5
+        # so the escalation deterministically reaches the Stage 3 LLM under test instead
+        # of being resolved by the DeBERTa gate.
+        with patch.dict(os.environ, {"ASF_DISABLE_STAGE25": "true"}):
+            with patch("interceptor._classifier") as mock_clf:
+                with patch("interceptor._stage3_llm") as mock_llm:
+                    mock_clf.predict_proba.return_value = mock_proba
+                    mock_llm.return_value = True
+                    result = security_interceptor("billing_agent", "read_db", "ambiguous input")
+                    mock_llm.assert_called_once()
+                    assert is_hitl(result) or is_blocked(result)
 
     def test_stage2_exact_block_threshold_is_dangerous(self):
-        mock_proba = [[0.15, 0.85]]
+        dangerous = BLOCK_THRESHOLD
+        mock_proba = [[1.0 - dangerous, dangerous]]
         with patch("interceptor._classifier") as mock_clf:
             mock_clf.predict_proba.return_value = mock_proba
             result = security_interceptor("billing_agent", "read_db", "test input")
-            assert is_blocked(result), f"dangerous_proba=0.85 == threshold must be BLOCKED"
+            assert is_blocked(result), f"dangerous_proba={dangerous:.2f} == {BLOCK_THRESHOLD} must be BLOCKED"
 
     def test_stage2_exact_pass_threshold_is_safe(self):
-        mock_proba = [[0.75, 0.25]]
+        dangerous = PASS_THRESHOLD
+        mock_proba = [[1.0 - dangerous, dangerous]]
         with patch("interceptor._classifier") as mock_clf:
             mock_clf.predict_proba.return_value = mock_proba
             result = security_interceptor("billing_agent", "read_db", "test input")
-            assert is_allowed(result), f"dangerous_proba=0.25 == pass_threshold must be ALLOWED"
+            assert is_allowed(result), f"dangerous_proba={dangerous:.2f} == {PASS_THRESHOLD} must be ALLOWED"
 
     def test_stage1_blocks_before_stage2_is_called(self):
         with patch("interceptor._stage2_classifier") as mock_stage2:
