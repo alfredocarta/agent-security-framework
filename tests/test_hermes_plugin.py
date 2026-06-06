@@ -4,20 +4,31 @@ from pathlib import Path
 import pytest
 
 
-# The Hermes plugin is deployed under the user's Hermes home, not vendored in this
-# repo. Skip (rather than error) when it is absent so a clean checkout / CI does not
-# report false failures for code that is not present in the tree.
-PLUGIN_PATH = Path.home() / ".hermes" / "plugins" / "asf-tracker" / "__init__.py"
+# The Hermes plugin is vendored in-repo as the source of truth; the test loads the repo
+# copy so CI exercises the version-controlled code (not whatever happens to be installed).
+# The deployed copy under the user's Hermes home is what runs in production and must stay
+# identical, which test_repo_and_deployed_plugin_in_sync asserts.
+REPO_PLUGIN_PATH = Path(__file__).resolve().parents[1] / "integrations" / "hermes" / "asf_tracker_plugin.py"
+DEPLOYED_PLUGIN_PATH = Path.home() / ".hermes" / "plugins" / "asf-tracker" / "__init__.py"
 
 
 def load_plugin_module():
-    if not PLUGIN_PATH.exists():
-        pytest.skip(f"Hermes asf-tracker plugin not present at {PLUGIN_PATH}")
-    spec = importlib.util.spec_from_file_location("asf_tracker_plugin", PLUGIN_PATH)
+    if not REPO_PLUGIN_PATH.exists():
+        pytest.skip(f"Vendored Hermes plugin not present at {REPO_PLUGIN_PATH}")
+    spec = importlib.util.spec_from_file_location("asf_tracker_plugin", REPO_PLUGIN_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def test_repo_and_deployed_plugin_in_sync():
+    if not DEPLOYED_PLUGIN_PATH.exists():
+        pytest.skip(f"No deployed plugin at {DEPLOYED_PLUGIN_PATH} to compare against")
+    assert REPO_PLUGIN_PATH.read_text() == DEPLOYED_PLUGIN_PATH.read_text(), (
+        "Vendored plugin and deployed ~/.hermes plugin have drifted; re-sync them "
+        "(the in-repo copy is the source of truth)."
+    )
 
 
 def test_normalize_tool_name_and_security_text():
