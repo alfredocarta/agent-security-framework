@@ -110,38 +110,51 @@ def test_claude_daemon_persists_pretool_input(tmp_path, monkeypatch):
     db_path = tmp_path / "daemon.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("ASF_HOOK_DB", str(db_path))
-    for module_name in ("asf_hook_daemon", "registry", "audit"):
+    # Reloading registry/audit rebinds their engines to this throwaway DB. Snapshot the
+    # original modules and restore sys.modules afterwards; otherwise later tests (and the
+    # already-imported interceptor, which keeps the original registry) end up with a
+    # split-brain registry pointing at this temp DB and start denying everything.
+    reloaded = ("asf_hook_daemon", "registry", "audit")
+    saved = {name: sys.modules.get(name) for name in reloaded}
+    for module_name in reloaded:
         sys.modules.pop(module_name, None)
-    import asf_hook_daemon
-
-    importlib.reload(asf_hook_daemon)
-    monkeypatch.setattr(asf_hook_daemon, "hardened_interceptor", lambda agent_id, tool, text: ("ALLOW", "ok"))
-
-    left, right = __import__("socket").socketpair()
-    asf_hook_daemon._client_slots.acquire()
     try:
-        payload = {
-            "tool": "shell",
-            "input": "python work.py --password=SECRET123456",
-            "tool_name": "Bash",
-            "tool_input": {"command": "python work.py --password=SECRET123456"},
-            "tool_call_id": "call-pre-1",
-            "session_id": "session-pre",
-        }
-        right.sendall((json.dumps(payload) + "\n").encode())
-        right.shutdown(__import__("socket").SHUT_WR)
-        asf_hook_daemon.handle_client(left)
-        response = json.loads(right.recv(4096).decode().strip())
-    finally:
-        right.close()
+        import asf_hook_daemon
 
-    assert response["verdict"] == "ALLOW"
-    with sqlite3.connect(db_path) as conn:
-        row = conn.execute("SELECT args_preview, args_hash FROM claude_tool_traces WHERE tool_call_id = 'call-pre-1'").fetchone()
-    assert row is not None
-    assert row[1]
-    assert "SECRET123456" not in row[0]
-    assert "[REDACTED_SECRET]" in row[0]
+        importlib.reload(asf_hook_daemon)
+        monkeypatch.setattr(asf_hook_daemon, "hardened_interceptor", lambda agent_id, tool, text: ("ALLOW", "ok"))
+
+        left, right = __import__("socket").socketpair()
+        asf_hook_daemon._client_slots.acquire()
+        try:
+            payload = {
+                "tool": "shell",
+                "input": "python work.py --password=SECRET123456",
+                "tool_name": "Bash",
+                "tool_input": {"command": "python work.py --password=SECRET123456"},
+                "tool_call_id": "call-pre-1",
+                "session_id": "session-pre",
+            }
+            right.sendall((json.dumps(payload) + "\n").encode())
+            right.shutdown(__import__("socket").SHUT_WR)
+            asf_hook_daemon.handle_client(left)
+            response = json.loads(right.recv(4096).decode().strip())
+        finally:
+            right.close()
+
+        assert response["verdict"] == "ALLOW"
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("SELECT args_preview, args_hash FROM claude_tool_traces WHERE tool_call_id = 'call-pre-1'").fetchone()
+        assert row is not None
+        assert row[1]
+        assert "SECRET123456" not in row[0]
+        assert "[REDACTED_SECRET]" in row[0]
+    finally:
+        for name, mod in saved.items():
+            if mod is not None:
+                sys.modules[name] = mod
+            else:
+                sys.modules.pop(name, None)
 
 
 def test_claude_hook_post_tool_use_persists_output(tmp_path, monkeypatch):

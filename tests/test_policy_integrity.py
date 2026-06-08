@@ -7,6 +7,24 @@ import pytest
 from registry import get_detection_patterns, store_detection_patterns, SessionLocal, PoliciesModel
 from interceptor import _get_patterns
 
+
+@pytest.fixture(autouse=True)
+def _preserve_detection_patterns():
+    # These tests intentionally overwrite or delete the detection_patterns row to verify
+    # DB-backed policy behavior. Snapshot it before each test and always restore it after,
+    # so a destructive case cannot leak corrupted or missing patterns into the shared test
+    # DB and break unrelated tests later in the suite (e.g. Stage 1 regex tests).
+    original = get_detection_patterns()
+    try:
+        yield
+    finally:
+        if original is not None:
+            store_detection_patterns(original)
+        else:
+            import migrate_policies
+            migrate_policies.migrate()
+
+
 class TestPolicyDBIntegrity:
     def test_patterns_loaded_from_db_not_yaml(self):
         patterns = _get_patterns()
@@ -50,10 +68,12 @@ class TestPolicyDBIntegrity:
         with open(original_path, "w") as f:
             yaml.dump(fake_yaml, f)
 
-        patterns_after = _get_patterns()
-
-        with open(original_path, "w") as f:
-            f.write(original_content)
+        try:
+            patterns_after = _get_patterns()
+        finally:
+            # Always restore the tracked repo file, even if _get_patterns raises.
+            with open(original_path, "w") as f:
+                f.write(original_content)
 
         assert patterns_after == patterns_before, \
             "Runtime patterns must come from DB, not from policies.yaml"

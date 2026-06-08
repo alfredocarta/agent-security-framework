@@ -1,0 +1,26 @@
+; ASF wrapper spike sandbox profile for macOS sandbox-exec.
+; sandbox-exec is deprecated by Apple. This profile is a feasibility probe only.
+; It is opt-in and intended only for synthetic test commands, not for a real user shell.
+
+(version 1)
+(deny default)
+
+; Run the requested process tree, but deny network explicitly below.
+(allow process*)
+(allow sysctl-read)
+(allow mach-lookup)
+(deny network*)
+
+; Allow reads so the shell, dynamic loader, locale files and system libraries can start.
+; The enforcement goal for this spike is ASF pre-execution blocking plus write and network confinement.
+(allow file-read*)
+
+; Minimal device access for stdio and process startup.
+(allow file-read-data file-write-data
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/random")
+  (literal "/dev/urandom"))
+
+; The only writable filesystem area is the caller supplied workdir.
+(allow file-write* (subpath (param "WORKDIR")))
