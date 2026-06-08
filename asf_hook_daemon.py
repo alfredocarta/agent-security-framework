@@ -77,6 +77,7 @@ def _read_runtime_pid() -> int:
 
 import registry
 from interceptor import hardened_interceptor
+from claude_trace_store import get_default_store
 
 try:
     registry.add_or_update_agent(
@@ -118,18 +119,57 @@ def handle_client(conn):
 
         asf_tool = req.get("tool", "shell")
         text = req.get("input", "")
+        tool_name = req.get("tool_name", asf_tool)
+        tool_input = req.get("tool_input", text)
+        session_id = req.get("session_id")
+        transcript_path = req.get("transcript_path")
+        tool_call_id = req.get("tool_call_id")
+
+        audit_hash_before = None
+        try:
+            from audit import AUDITOR
+            audit_hash_before = AUDITOR.last_hash_for(AGENT_ID)
+        except Exception:
+            AUDITOR = None
 
         result = hardened_interceptor(AGENT_ID, asf_tool, text)
-        verdict = result[0]
+        raw_verdict = result[0]
+        verdict = raw_verdict
         reason = result[1] if len(result) > 1 else ""
         if verdict == "HITL":
             verdict = "DENY"
+            reason = reason or "Human approval required"
         elif verdict not in {"ALLOW", "DENY"}:
             invalid_verdict = verdict
             verdict = "DENY"
             reason = f"invalid interceptor verdict: {invalid_verdict!r}"
 
-        resp = json.dumps({"verdict": verdict, "reason": reason}) + "\n"
+        audit_hash = None
+        try:
+            audit_hash_after = AUDITOR.last_hash_for(AGENT_ID) if AUDITOR is not None else None
+            if audit_hash_after and audit_hash_after != audit_hash_before:
+                audit_hash = audit_hash_after
+        except Exception:
+            audit_hash = None
+
+        trace_id = None
+        try:
+            trace_id = get_default_store().start_trace(
+                session_id=session_id,
+                transcript_path=transcript_path,
+                tool_call_id=tool_call_id,
+                claude_tool_name=tool_name,
+                asf_tool_name=asf_tool,
+                args=tool_input,
+                verdict=raw_verdict,
+                outcome="ALLOWED" if verdict == "ALLOW" else "BLOCKED",
+                reason=reason,
+                audit_hash=audit_hash,
+            )
+        except Exception as exc:
+            print(f"[ASF daemon] claude trace persist error: {exc}", file=sys.stderr, flush=True)
+
+        resp = json.dumps({"verdict": verdict, "reason": reason, "trace_id": trace_id, "audit_hash": audit_hash}) + "\n"
         conn.sendall(resp.encode())
     except Exception as e:
         resp = json.dumps({"verdict": "DENY", "reason": f"daemon error: {e}"}) + "\n"

@@ -248,6 +248,14 @@ Privacy note: `args_preview` and `output_preview` store redacted, truncated prev
 
 Important: post_tool_call is where the dashboard duration=0 issue should be fixed. Do not infer duration from audit hash-chain timestamps only; store Hermes duration_ms directly.
 
+Deployment note: after changing `integrations/hermes/asf_tracker_plugin.py`, copy the identical file to `~/.hermes/plugins/asf-tracker/__init__.py` and restart every long-running Hermes worker, not only the gateway. Processes such as `venv/bin/hermes` keep the old plugin module in memory until restart. Existing `hermes_tool_traces` rows are historical and are not backfilled. Verify new output capture with a temporary database:
+
+```bash
+export ASF_HERMES_DB=/tmp/asf-hermes-smoke.db
+# run one Hermes tool call, then inspect the newest row
+sqlite3 /tmp/asf-hermes-smoke.db "select output_preview, output_hash from hermes_tool_traces order by timestamp desc limit 1;"
+```
+
 ---
 
 ## 8. Output guard for Hermes

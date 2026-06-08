@@ -11,6 +11,8 @@ running, starts it automatically (first call pays startup cost).
 Exit 0 = allow, exit 2 = block (stdout shown to Claude Code as reason).
 
 Env:
+  ASF_HOOK_MONITOR_ONLY=true       kill-switch: monitor only, never block (default)
+  ASF_HOOK_MONITOR_ONLY=false      enforce ASF DENY/HITL decisions
   ASF_HOOK_FAIL_CLOSED=true        block on daemon errors instead of allow
   ASF_HOOK_RETRIES=2               connection retry count (default 2, 0-10)
   ASF_HOOK_STARTUP_TIMEOUT=10      seconds to wait for daemon to start (1-60)
@@ -28,6 +30,8 @@ import subprocess
 import time
 import fcntl
 
+from claude_trace_store import get_default_store, make_tool_call_id
+
 RUNTIME_DIR     = os.path.expanduser("~/.cache/asf-hook")
 SOCKET_PATH     = os.path.join(RUNTIME_DIR, "asf_hook.sock")
 PID_FILE        = os.path.join(RUNTIME_DIR, "asf_hook.pid")
@@ -37,6 +41,7 @@ WATCHED_FILES   = [
     DAEMON_SCRIPT,
     os.path.join(os.path.dirname(DAEMON_SCRIPT), "hardening.py"),
     os.path.join(os.path.dirname(DAEMON_SCRIPT), "interceptor.py"),
+    os.path.join(os.path.dirname(DAEMON_SCRIPT), "claude_trace_store.py"),
 ]
 PYTHON          = "/Users/alfredo/miniconda3/envs/eval-framework/bin/python"
 TIMEOUT         = 1.0
@@ -83,16 +88,17 @@ def _int_env(name: str, default: int, lo: int, hi: int) -> int:
     try:
         return min(max(int(os.environ.get(name, str(default))), lo), hi)
     except ValueError:
-        print(f"[ASF DENY] invalid env: {name}", flush=True)
-        sys.exit(2)
+        # A typo'd env var must not block every tool call; warn and use the default.
+        print(f"[ASF WARN] invalid env {name}, using default {default}", file=sys.stderr, flush=True)
+        return default
 
 
 def _float_env(name: str, default: float, lo: float, hi: float) -> float:
     try:
         return min(max(float(os.environ.get(name, str(default))), lo), hi)
     except ValueError:
-        print(f"[ASF DENY] invalid env: {name}", flush=True)
-        sys.exit(2)
+        print(f"[ASF WARN] invalid env {name}, using default {default}", file=sys.stderr, flush=True)
+        return default
 
 
 RETRIES         = _int_env("ASF_HOOK_RETRIES", 2, 0, 10)
@@ -101,6 +107,20 @@ FAIL_CLOSED     = os.environ.get("ASF_HOOK_FAIL_CLOSED", "false").lower() == "tr
 # Monitor mode (default): ASF logs every matched tool call to the audit trail but never
 # blocks. Set ASF_HOOK_MONITOR_ONLY=false to let DENY verdicts block the tool.
 MONITOR_ONLY    = os.environ.get("ASF_HOOK_MONITOR_ONLY", "true").lower() == "true"
+
+
+def _fail_open(reason: str) -> None:
+    """Exit safely on a malformed payload or broken runtime.
+
+    Default posture is fail-open: a bad/unexpected hook payload or a runtime problem must
+    never lock the user out of their own tools. Only block (exit 2) when the operator has
+    explicitly opted into ASF_HOOK_FAIL_CLOSED=true.
+    """
+    if FAIL_CLOSED:
+        print(f"[ASF DENY] {reason}", flush=True)
+        sys.exit(2)
+    print(f"[ASF WARN] fail-open: {reason}", file=sys.stderr, flush=True)
+    sys.exit(0)
 
 
 def is_bash_passthrough(command: str) -> bool:
@@ -266,7 +286,7 @@ def ensure_daemon():
         _ensure_daemon_locked()
 
 
-def query_daemon(asf_tool, text):
+def query_daemon(asf_tool, text, metadata=None):
     ensure_daemon()
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     resp = b""
@@ -284,7 +304,10 @@ def query_daemon(asf_tool, text):
             raise RuntimeError(f"socket peer PID mismatch: {peer_pid} != {expected_pid}")
         if not _pid_belongs_to_daemon(expected_pid):
             raise RuntimeError(f"socket peer is not trusted daemon: {expected_pid}")
-        req = json.dumps({"tool": asf_tool, "input": text}) + "\n"
+        req_payload = {"tool": asf_tool, "input": text}
+        if metadata:
+            req_payload.update(metadata)
+        req = json.dumps(req_payload) + "\n"
         sock.sendall(req.encode())
         while True:
             chunk = sock.recv(4096)
@@ -310,8 +333,56 @@ def _init_runtime_dir():
         finally:
             os.close(fd)
     except Exception:
-        print(f"[ASF DENY] unsafe ASF hook runtime dir: {RUNTIME_DIR}", flush=True)
-        sys.exit(2)
+        _fail_open(f"unsafe ASF hook runtime dir: {RUNTIME_DIR}")
+
+
+def _extract_tool_output(payload):
+    for key in ("tool_response", "tool_output", "output", "response", "result"):
+        if key in payload:
+            return payload.get(key)
+    return None
+
+
+def _suggest_asf_command(tool_name: str, text: str) -> str:
+    if tool_name == "Bash":
+        try:
+            parts = shlex.split(text)
+        except ValueError:
+            parts = []
+        if parts:
+            return " ".join([f"asf_{parts[0]}"] + parts[1:])
+        return "asf_bash <command>"
+    return f"asf_{tool_name.lower()}"
+
+
+def _block_message(tool_name: str, text: str, reason: str) -> str:
+    suggestion = _suggest_asf_command(tool_name, text)
+    return (
+        f"[ASF DENY] comando bloccato: {reason}\n"
+        f"Riesegui tramite il comando con prefisso ASF, ad esempio: `{suggestion}`.\n"
+        "Kill-switch sviluppo: esporta ASF_HOOK_MONITOR_ONLY=true per tornare in monitor."
+    )
+
+
+def _handle_post_tool_use(payload: dict) -> None:
+    tool_name = payload.get("tool_name", "")
+    tool_input = payload.get("tool_input", {})
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    tool_call_id = make_tool_call_id(payload, tool_name, tool_input)
+    result = _extract_tool_output(payload)
+    if result is None:
+        return
+    try:
+        get_default_store().finish_trace(
+            result=result,
+            tool_call_id=tool_call_id,
+            session_id=payload.get("session_id"),
+        )
+    except Exception:
+        if FAIL_CLOSED:
+            print("[ASF DENY] failed to persist PostToolUse output", flush=True)
+            sys.exit(2)
 
 
 def main():
@@ -319,26 +390,27 @@ def main():
 
     raw = sys.stdin.buffer.read(MAX_STDIN_BYTES + 1)
     if len(raw) > MAX_STDIN_BYTES:
-        print("[ASF DENY] hook request too large", flush=True)
-        sys.exit(2)
+        _fail_open("hook request too large")
     raw = raw.decode("utf-8", errors="replace")
 
     try:
         payload = json.loads(raw)
     except Exception:
-        print("[ASF DENY] invalid hook request", flush=True)
-        sys.exit(2)
+        _fail_open("invalid hook request")
 
     if not isinstance(payload, dict):
-        print("[ASF DENY] invalid hook request", flush=True)
-        sys.exit(2)
+        _fail_open("invalid hook request")
 
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input", {})
+    hook_event = str(payload.get("hook_event_name") or payload.get("event") or "PreToolUse")
+
+    if hook_event == "PostToolUse":
+        _handle_post_tool_use(payload)
+        sys.exit(0)
 
     if not isinstance(tool_input, dict):
-        print("[ASF DENY] invalid hook request", flush=True)
-        sys.exit(2)
+        _fail_open("invalid hook request")
 
     if tool_name not in TOOL_MAP:
         sys.exit(2 if FAIL_CLOSED else 0)
@@ -346,8 +418,7 @@ def main():
     asf_tool, extractor = TOOL_MAP[tool_name]
     text = extractor(tool_input)
     if not isinstance(text, str):
-        print("[ASF DENY] invalid Bash command payload", flush=True)
-        sys.exit(2)
+        _fail_open("invalid tool command payload")
     if not text or not text.strip():
         sys.exit(0)
 
@@ -357,7 +428,14 @@ def main():
     last_error = None
     for _ in range(RETRIES + 1):
         try:
-            data = query_daemon(asf_tool, text)
+            metadata = {
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "tool_call_id": make_tool_call_id(payload, tool_name, tool_input),
+                "session_id": payload.get("session_id"),
+                "transcript_path": payload.get("transcript_path"),
+            }
+            data = query_daemon(asf_tool, text, metadata)
             verdict = data.get("verdict")
             if verdict not in {"ALLOW", "DENY"}:
                 raise ValueError(f"invalid daemon verdict: {verdict!r}")
@@ -370,7 +448,7 @@ def main():
                 sys.exit(0)
             if verdict == "ALLOW":
                 sys.exit(0)
-            print(f"[ASF {verdict}] {reason}", flush=True)
+            print(_block_message(tool_name, text, reason), flush=True)
             sys.exit(2)
         except Exception as exc:
             last_error = exc

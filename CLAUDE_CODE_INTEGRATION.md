@@ -74,7 +74,18 @@ Add to `~/.claude/settings.json`:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/alfredo/miniconda3/envs/eval-framework/bin/python /Users/alfredo/Projects/agent-security-framework/asf_hook.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|WebFetch",
         "hooks": [
           {
             "type": "command",
@@ -86,6 +97,32 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+### Enforcement and transparency
+
+Default mode is monitor-only. The daemon records the ASF decision and the hook
+returns success even when ASF would block the call. To enforce real blocking,
+start Claude Code with:
+
+```bash
+export ASF_HOOK_MONITOR_ONLY=false
+```
+
+When ASF returns `DENY` or `HITL`, the PreToolUse hook exits with Claude Code's
+blocking code and prints a remediation message. The convention is to rerun the
+operation through an ASF-prefixed tool, for example `grep foo file` becomes
+`asf_grep foo file`, and native tools follow `asf_<tool>`.
+
+Anti-lockout controls:
+
+- Immediate kill-switch: `export ASF_HOOK_MONITOR_ONLY=true`.
+- Safe passthrough remains enabled for `ls`, `cd`, `pwd`, `which`, `type`, `df`.
+- Daemon failures fail open by default. Set `ASF_HOOK_FAIL_CLOSED=true` only for
+  controlled tests or production enforcement.
+
+The PreToolUse hook writes a redacted and truncated input preview plus hash to
+`claude_tool_traces`. The PostToolUse hook writes a redacted and truncated output
+preview plus hash when Claude Code includes the output in the hook payload.
 
 ### Passthrough
 
@@ -106,9 +143,9 @@ Restart logic:
 
 - **Stale socket**: if `asf_hook.sock` exists but does not accept connections,
   it is removed and the daemon is restarted.
-- **Source change**: if `asf_hook_daemon.py`, `hardening.py`, or
-  `interceptor.py` has a newer mtime than the socket, the daemon is restarted
-  to pick up the updated code.
+- **Source change**: if `asf_hook_daemon.py`, `claude_trace_store.py`,
+  `hardening.py`, or `interceptor.py` has a newer mtime than the socket, the
+  daemon is restarted to pick up the updated code.
 - **Concurrent startup**: an fcntl exclusive lock on `~/.cache/asf-hook/asf_hook.lock`
   prevents multiple hook processes from spawning duplicate daemons.
 
@@ -257,11 +294,11 @@ Hook-blocked commands appear as `L1.5_BLOCK` or `BLOCKED` events in the
 session timeline and are counted in the EU AI Act compliance table under
 Art. 9 (Risk management).
 
-### Known transparency gap
+### Transparency notes
 
-Claude Code native PreToolUse hooks currently persist only the ASF audit-chain
-reason and stage data in `audit_trail`. The hook receives the proposed tool
-input before execution, but there is no dedicated input/output evidence table
-for Claude Code yet. Native tool output is not available to PreToolUse hooks by
-design, so the dashboard must render input/output as `not recorded` for these
-rows. Hermes traces are the source of truth for redacted input/output previews.
+Claude Code native hooks now persist drill-down context in `claude_tool_traces`.
+PreToolUse stores the redacted and truncated input preview plus hash and links it
+to the ASF audit event when available. PostToolUse stores the redacted and
+truncated output preview plus hash when Claude Code exposes output in the hook
+payload. If a native tool or Claude Code version omits output in PostToolUse, the
+dashboard renders output as `non registrato` for that call.
