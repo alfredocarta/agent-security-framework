@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +48,10 @@ if not (DEFAULT_ASF_ROOT / "interceptor.py").exists():
     )
 
 _AGENT_REGISTERED = False
+_TRACE_BY_CALL_KEY: dict[tuple[str, str, str], str] = {}
+_TRACE_LOCK = threading.Lock()
+_SANDBOX_DISPATCH_INSTALLED = False
+_ORIGINAL_DISPATCH = None
 
 TOOL_MAP = {
     "terminal": "shell",
@@ -150,6 +160,18 @@ def _safe_preview(value: Any, max_chars: int | None = None) -> str:
         return text
     return f"{text[:max_chars]}...[truncated {len(text) - max_chars} chars]"
 
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _args_hash(args: Any) -> str:
+    return hashlib.sha256(_stable_json(args).encode("utf-8", errors="replace")).hexdigest()
+
+
+def _call_key(task_id: str, tool_name: str, args: dict[str, Any] | None) -> tuple[str, str, str]:
+    return (task_id or "", tool_name or "", _args_hash(_redact_value(args or {})))
+
+
 def build_security_text(tool_name: str, args: dict[str, Any] | None) -> str:
 
     args = args or {}
@@ -256,6 +278,107 @@ def _block_directive(verdict: str, reason: str) -> dict[str, str]:
     return {"action": "block", "message": f"[ASF BLOCKED] {reason}"}
 
 
+def _sandbox_enabled() -> bool:
+    return _env_bool("ASF_HERMES_SANDBOX", False)
+
+
+def _sandbox_workdir() -> str:
+    configured = os.environ.get("ASF_HERMES_SANDBOX_WORKDIR")
+    if configured:
+        path = Path(configured).expanduser().resolve()
+    else:
+        path = Path(tempfile.gettempdir()) / "asf-hermes-sandbox" / (os.environ.get("ASF_HERMES_SESSION", "default"))
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def _sandbox_cwd(requested: str | None, root: str) -> str:
+    root_path = Path(root).resolve()
+    if requested:
+        candidate = Path(requested).expanduser().resolve()
+        try:
+            candidate.relative_to(root_path)
+            candidate.mkdir(parents=True, exist_ok=True)
+            return str(candidate)
+        except Exception:
+            pass
+    return str(root_path)
+
+
+def _sandbox_argv(command: list[str]) -> tuple[list[str], str | None]:
+    sandbox_exec = shutil.which("sandbox-exec")
+    if not sandbox_exec:
+        warning = "sandbox-exec not available, executing without OS sandbox"
+        if _env_bool("ASF_HERMES_SANDBOX_FAIL_CLOSED", False):
+            raise RuntimeError(warning)
+        return command, warning
+    profile = DEFAULT_ASF_ROOT / "wrapper" / "asf_sandbox.sb"
+    return [sandbox_exec, "-D", f"WORKDIR={_sandbox_workdir()}", "-f", str(profile), *command], None
+
+
+def _run_sandboxed_process(command: list[str], *, cwd: str, timeout: int | None = None) -> dict[str, Any]:
+    argv, warning = _sandbox_argv(command)
+    completed = subprocess.run(
+        argv,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        timeout=timeout or int(os.environ.get("ASF_HERMES_SANDBOX_TIMEOUT", "30")),
+        check=False,
+    )
+    output = completed.stdout
+    if completed.stderr:
+        output = f"{output}\n[stderr]\n{completed.stderr}" if output else f"[stderr]\n{completed.stderr}"
+    result: dict[str, Any] = {"output": output, "exit_code": completed.returncode, "sandboxed": warning is None}
+    if warning:
+        result["sandbox_warning"] = warning
+    return result
+
+
+def _sandbox_terminal(args: dict[str, Any]) -> str:
+    if args.get("background") or args.get("pty"):
+        return json.dumps({"error": "ASF sandbox MVP supports only foreground non-PTY terminal calls"})
+    root = _sandbox_workdir()
+    cwd = _sandbox_cwd(args.get("workdir"), root)
+    result = _run_sandboxed_process(
+        ["/bin/sh", "-c", str(args.get("command", ""))],
+        cwd=cwd,
+        timeout=args.get("timeout"),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _sandbox_execute_code(args: dict[str, Any]) -> str:
+    root = _sandbox_workdir()
+    cwd = _sandbox_cwd(args.get("workdir"), root)
+    code = str(args.get("code", ""))
+    result = _run_sandboxed_process([sys.executable, "-c", code], cwd=cwd)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def install_sandbox_dispatch() -> None:
+    global _SANDBOX_DISPATCH_INSTALLED, _ORIGINAL_DISPATCH
+    if _SANDBOX_DISPATCH_INSTALLED or not _sandbox_enabled():
+        return
+    try:
+        from tools.registry import registry as tool_registry
+    except Exception:
+        return
+
+    original = tool_registry.dispatch
+
+    def sandbox_dispatch(name: str, args: dict, **kwargs: Any) -> str:
+        if name == "terminal":
+            return _sandbox_terminal(args or {})
+        if name == "execute_code":
+            return _sandbox_execute_code(args or {})
+        return original(name, args, **kwargs)
+
+    tool_registry.dispatch = sandbox_dispatch
+    _ORIGINAL_DISPATCH = original
+    _SANDBOX_DISPATCH_INSTALLED = True
+
+
 def on_pre_tool_call(
     *,
     tool_name: str = "",
@@ -267,6 +390,7 @@ def on_pre_tool_call(
 ) -> dict[str, str] | None:
     if not _enabled() or not tool_name:
         return None
+    install_sandbox_dispatch()
 
     args = args if isinstance(args, dict) else {}
     asf_tool_name = normalize_tool_name(tool_name)
@@ -307,7 +431,7 @@ def on_pre_tool_call(
             audit_hash = None
 
     try:
-        _store().start_trace(
+        trace_id = _store().start_trace(
             agent_id=_agent_id(),
             session_id=session_id or None,
             task_id=task_id or None,
@@ -323,6 +447,8 @@ def on_pre_tool_call(
             asf_latency_ms=asf_latency_ms,
             audit_hash=audit_hash,
         )
+        with _TRACE_LOCK:
+            _TRACE_BY_CALL_KEY[_call_key(task_id, tool_name, args)] = trace_id
     except Exception:
         if _env_bool("ASF_HERMES_FAIL_CLOSED", False):
             return {"action": "block", "message": "[ASF BLOCKED] failed to persist Hermes trace"}
@@ -375,11 +501,15 @@ def on_post_tool_call(
     output_risky, output_reason = _detect_output_risk(result)
     persisted_result = _redact_value(result)
     output_verdict = "DENY" if output_risky else None
+    trace_id = None
+    with _TRACE_LOCK:
+        trace_id = _TRACE_BY_CALL_KEY.pop(_call_key(task_id, tool_name, args), None)
     try:
         _store().finish_trace(
             tool_call_id=tool_call_id or None,
             session_id=session_id or None,
             task_id=task_id or None,
+            trace_id=trace_id,
             # output_preview stores a redacted, truncated preview plus output_hash.
             # Native Claude Code hook outputs are not available here.
             result=persisted_result,
@@ -394,5 +524,6 @@ def on_post_tool_call(
 
 
 def register(ctx) -> None:
+    install_sandbox_dispatch()
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)

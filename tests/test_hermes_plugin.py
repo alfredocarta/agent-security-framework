@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -116,6 +118,38 @@ def test_post_hook_persists_redacted_output_preview(monkeypatch, tmp_path):
     assert "supersecretvalue" not in rows[0]["args_preview"]
 
 
+def test_post_hook_correlates_output_without_tool_call_id(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+
+    db_path = tmp_path / "trace.db"
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *args, **kwargs: ("ALLOW", "test allow"))
+    args_one = {"command": "printf one"}
+    args_two = {"command": "printf two"}
+    plugin.on_pre_tool_call(tool_name="terminal", args=args_one, task_id="task-shared")
+    plugin.on_pre_tool_call(tool_name="terminal", args=args_two, task_id="task-shared")
+
+    plugin.on_post_tool_call(
+        tool_name="terminal",
+        args=args_one,
+        result={"stdout": "one"},
+        task_id="task-shared",
+        duration_ms=7,
+    )
+
+    from hermes_trace_store import HermesTraceStore
+    rows = HermesTraceStore(db_path).fetch_traces(limit=10)
+    one = next(row for row in rows if "printf one" in row["args_preview"])
+    two = next(row for row in rows if "printf two" in row["args_preview"])
+    assert one["output_preview"]
+    assert "one" in one["output_preview"]
+    assert one["tool_duration_ms"] == 7
+    assert two["output_preview"] is None
+
+
 def test_pre_hook_enforce_blocks_deny(monkeypatch, tmp_path):
     plugin = load_plugin_module()
 
@@ -137,6 +171,91 @@ def test_pre_hook_enforce_blocks_deny(monkeypatch, tmp_path):
     )
 
     assert result == {"action": "block", "message": "[ASF BLOCKED] test deny"}
+
+
+def test_pre_hook_enforce_real_asf_blocks_without_side_effect(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._AGENT_REGISTERED = False
+
+    side_effect = tmp_path / "hermes-deny-side-effect.txt"
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.setenv("ASF_HERMES_REGISTRY_RESET", "true")
+    monkeypatch.setenv("ASF_SKIP_LLM", "true")
+
+    result = plugin.on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": f"DROP TABLE users; touch {side_effect}"},
+        task_id="task-deny",
+    )
+
+    assert result is not None
+    assert result["action"] == "block"
+    assert not side_effect.exists()
+
+    from registry import AuditModel, SessionLocal
+    db = SessionLocal()
+    try:
+        rows = db.query(AuditModel).filter(AuditModel.agent_id == "hermes-live-agent").all()
+    finally:
+        db.close()
+    assert rows
+
+
+def test_pre_hook_monitor_real_asf_does_not_block(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._AGENT_REGISTERED = False
+
+    side_effect = tmp_path / "monitor-side-effect.txt"
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.setenv("ASF_HERMES_REGISTRY_RESET", "true")
+    monkeypatch.setenv("ASF_SKIP_LLM", "true")
+
+    result = plugin.on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": f"DROP TABLE users; touch {side_effect}"},
+        task_id="task-monitor",
+    )
+
+    assert result is None
+    side_effect.write_text("monitor proceeded")
+    assert side_effect.exists()
+
+
+def test_sandbox_terminal_confines_writes(monkeypatch, tmp_path):
+    if not shutil.which("sandbox-exec"):
+        pytest.skip("sandbox-exec is not available on this platform")
+    plugin = load_plugin_module()
+    sandbox_root = tmp_path / "sandbox"
+    outside = tmp_path / "outside.txt"
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_WORKDIR", str(sandbox_root))
+
+    raw = plugin._sandbox_terminal({"command": f"echo nope > {outside}"})
+    result = json.loads(raw)
+
+    assert result["sandboxed"] is True
+    assert result["exit_code"] != 0
+    assert not outside.exists()
+
+
+def test_sandbox_execute_code_blocks_network(monkeypatch, tmp_path):
+    if not shutil.which("sandbox-exec"):
+        pytest.skip("sandbox-exec is not available on this platform")
+    plugin = load_plugin_module()
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_WORKDIR", str(tmp_path / "sandbox"))
+
+    raw = plugin._sandbox_execute_code(
+        {"code": "import socket; socket.create_connection(('127.0.0.1', 9), 0.2)"}
+    )
+    result = json.loads(raw)
+
+    assert result["sandboxed"] is True
+    assert result["exit_code"] != 0
 
 
 class _FakeRegistry:
