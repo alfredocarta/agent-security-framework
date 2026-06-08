@@ -1,6 +1,8 @@
 import os
 os.environ["ASF_SKIP_LLM"] = "true"
 
+import sys
+import types
 import pytest
 from unittest.mock import patch
 from interceptor import security_interceptor, BLOCK_THRESHOLD, PASS_THRESHOLD
@@ -40,14 +42,15 @@ class TestStageThresholds:
         # A grey-zone Stage 2 verdict now escalates to Stage 2.5 first; disable Stage 2.5
         # so the escalation deterministically reaches the Stage 3 LLM under test instead
         # of being resolved by the DeBERTa gate.
-        with patch.dict(os.environ, {"ASF_DISABLE_STAGE25": "true"}):
-            with patch("interceptor._classifier") as mock_clf:
-                with patch("interceptor._stage3_llm") as mock_llm:
-                    mock_clf.predict_proba.return_value = mock_proba
-                    mock_llm.return_value = True
-                    result = security_interceptor("billing_agent", "read_db", "ambiguous input")
-                    mock_llm.assert_called_once()
-                    assert is_hitl(result) or is_blocked(result)
+        with patch.dict(os.environ, {"ASF_DISABLE_STAGE25": "true", "ASF_STAGE3_BACKEND": "llm"}):
+            with patch("interceptor._STAGE3_BACKEND", "llm"):
+                with patch("interceptor._classifier") as mock_clf:
+                    with patch("interceptor._stage3_llm") as mock_llm:
+                        mock_clf.predict_proba.return_value = mock_proba
+                        mock_llm.return_value = True
+                        result = security_interceptor("billing_agent", "read_db", "ambiguous input")
+                        mock_llm.assert_called_once()
+                        assert is_hitl(result) or is_blocked(result)
 
     def test_stage2_exact_block_threshold_is_dangerous(self):
         dangerous = BLOCK_THRESHOLD
@@ -105,3 +108,24 @@ class TestStageThresholds:
                 mock_clf.predict_proba.return_value = mock_proba
                 security_interceptor("billing_agent", "read_db", "dangerous input")
                 mock_llm.assert_not_called(), "Stage 3 must not be called when Stage 2 is DANGEROUS"
+
+    def test_stage25_kill_switch_reason_includes_label_and_score(self, monkeypatch):
+        events = []
+        dangerous = (PASS_THRESHOLD + BLOCK_THRESHOLD) / 2
+        mock_proba = [[1.0 - dangerous, dangerous]]
+        stage25 = types.SimpleNamespace(classify_text_scored=lambda _text: ("DANGEROUS", 0.987))
+
+        def capture(agent_id, action, outcome, reason, **kwargs):
+            events.append({"outcome": outcome, "reason": reason, "kwargs": kwargs})
+
+        monkeypatch.setitem(sys.modules, "stage25_deberta", stage25)
+        monkeypatch.setattr("interceptor.AUDITOR.log_event", capture)
+        with patch("interceptor._classifier") as mock_clf:
+            mock_clf.predict_proba.return_value = mock_proba
+            result = security_interceptor("billing_agent", "read_db", "ambiguous input")
+
+        assert result[0] == "DENY"
+        assert "Stage 2.5 DeBERTa: DANGEROUS p=0.99" in result[1]
+        kill = next(e for e in events if e["outcome"] == "KILL_SWITCH")
+        assert kill["reason"] == "Stage 2.5 DeBERTa: DANGEROUS p=0.99"
+        assert kill["kwargs"]["confidence"] == 0.987

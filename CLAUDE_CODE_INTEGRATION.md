@@ -294,6 +294,14 @@ Hook-blocked commands appear as `L1.5_BLOCK` or `BLOCKED` events in the
 session timeline and are counted in the EU AI Act compliance table under
 Art. 9 (Risk management).
 
+### Block catalog reason detail
+
+New Stage 2.5 decisions include the concrete detector signal in the audit
+reason, for example `Stage 2.5 DeBERTa: DANGEROUS p=0.99`. The dashboard block
+catalog uses this label and score bucket to break down which mechanism blocked
+each agent. Historical rows keep their old generic reason and are not
+backfilled.
+
 ### Transparency notes
 
 Claude Code native hooks now persist drill-down context in `claude_tool_traces`.

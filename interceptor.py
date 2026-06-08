@@ -571,9 +571,10 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                     if os.environ.get("ASF_STAGE25_SUSPEND_ON_KILL", "").lower() == "true":
                         registry.suspend_agent(agent_id)
                     AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
-                                      "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)",
-                                      trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
-                    return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)."
+                                      f"Stage 2.5 DeBERTa: {stage25_verdict} p={stage25_score:.2f}",
+                                      trace_id=trace_id, latency_ms=_ms(), confidence=stage25_score, session_id=session_id,
+                                      metadata={"deberta_injection_score": stage25_score})
+                    return "DENY", f"KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa: {stage25_verdict} p={stage25_score:.2f})."
 
             if stage25_verdict == "SAFE":
                 AUDITOR.log_event(agent_id, tool_name, "ALLOWED",
