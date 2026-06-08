@@ -79,6 +79,43 @@ def test_pre_hook_monitor_records_allow_without_blocking(monkeypatch, tmp_path):
     assert rows[0]["verdict"] == "ALLOW"
 
 
+def test_post_hook_persists_redacted_output_preview(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+
+    db_path = tmp_path / "trace.db"
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.setenv("ASF_HERMES_MAX_PREVIEW_BYTES", "120")
+
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *args, **kwargs: ("ALLOW", "test allow"))
+    plugin.on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": "printf ok", "token": "secret=supersecretvalue"},
+        task_id="task-1",
+        session_id="session-1",
+        tool_call_id="call-output",
+    )
+    plugin.on_post_tool_call(
+        tool_name="terminal",
+        output={"stdout": "ok", "token": "api_key=abcdef1234567890"},
+        task_id="task-1",
+        session_id="session-1",
+        tool_call_id="call-output",
+        duration_ms=12,
+    )
+
+    from hermes_trace_store import HermesTraceStore
+    rows = HermesTraceStore(db_path).fetch_traces(session_id="session-1")
+    assert len(rows) == 1
+    assert rows[0]["output_preview"]
+    assert rows[0]["output_hash"]
+    assert rows[0]["tool_duration_ms"] == 12
+    assert "[REDACTED_SECRET]" in rows[0]["output_preview"]
+    assert "abcdef1234567890" not in rows[0]["output_preview"]
+    assert "supersecretvalue" not in rows[0]["args_preview"]
+
+
 def test_pre_hook_enforce_blocks_deny(monkeypatch, tmp_path):
     plugin = load_plugin_module()
 

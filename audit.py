@@ -38,6 +38,15 @@ def _get_langfuse():
 
 
 class AuditTrail:
+    def __init__(self):
+        # Most recent event hash written per agent, in-process. Lets a same-process
+        # caller (e.g. the Hermes plugin) back-link its tool-call record to the terminal
+        # audit event it just produced, without changing the interceptor return contract.
+        self._last_hash_by_agent = {}
+
+    def last_hash_for(self, agent_id):
+        return self._last_hash_by_agent.get(agent_id)
+
     def log_event(self, agent_id, action, outcome, reason,
                   *, trace_id=None, latency_ms=None, confidence=None,
                   metadata=None, session_id=None):
@@ -66,6 +75,7 @@ class AuditTrail:
 
                 db.add(event)
                 db.commit()
+                self._last_hash_by_agent[agent_id] = new_hash
                 print(f"[AUDIT] Event stored: {new_hash[:12]}", file=__import__("sys").stderr)
             except Exception as e:
                 db.rollback()

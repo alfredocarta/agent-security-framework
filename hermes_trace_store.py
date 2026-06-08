@@ -12,7 +12,10 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 
-DEFAULT_MAX_PREVIEW_BYTES = int(os.environ.get("ASF_HERMES_MAX_PREVIEW_BYTES", "2048"))
+DEFAULT_MAX_PREVIEW_BYTES = int(
+    os.environ.get("ASF_HERMES_MAX_PREVIEW_BYTES")
+    or os.environ.get("ASF_HERMES_MAX_ARG_BYTES", "2048")
+)
 
 
 _SCHEMA = """

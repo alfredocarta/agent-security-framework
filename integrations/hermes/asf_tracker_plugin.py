@@ -121,15 +121,37 @@ def normalize_tool_name(tool_name: str) -> str:
     return tool_name
 
 
+def _redact_text(text: str) -> str:
+    redacted = text
+    for pattern in SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED_SECRET]", redacted)
+    canary = os.environ.get("ASF_HERMES_CANARY")
+    if canary:
+        redacted = redacted.replace(canary, "[REDACTED_CANARY]")
+    return redacted
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    return value
+
+
 def _safe_preview(value: Any, max_chars: int | None = None) -> str:
     max_chars = max_chars or int(os.environ.get("ASF_HERMES_MAX_ARG_BYTES", "8192"))
-    text = str(value)
+    text = _redact_text(str(value))
     if len(text) <= max_chars:
         return text
-    return f"{text[:max_chars]}…[truncated {len(text) - max_chars} chars]"
-
+    return f"{text[:max_chars]}...[truncated {len(text) - max_chars} chars]"
 
 def build_security_text(tool_name: str, args: dict[str, Any] | None) -> str:
+
     args = args or {}
     asf_tool = normalize_tool_name(tool_name)
     parts = [f"source=hermes", f"tool={tool_name}", f"asf_tool={asf_tool}"]
@@ -249,6 +271,18 @@ def on_pre_tool_call(
     args = args if isinstance(args, dict) else {}
     asf_tool_name = normalize_tool_name(tool_name)
     security_text = build_security_text(tool_name, args)
+
+    # Snapshot the agent's last audit hash so we can back-link this trace to the
+    # terminal audit_trail event the interceptor is about to write. The interceptor
+    # runs in this same process, so the auditor's in-memory pointer is exact.
+    auditor = None
+    audit_hash_before = None
+    try:
+        from audit import AUDITOR as auditor  # noqa: F401  (rebinds local)
+        audit_hash_before = auditor.last_hash_for(_agent_id())
+    except Exception:
+        auditor = None
+
     t0 = time.monotonic()
     verdict = "ALLOW"
     reason = "ASF monitor disabled"
@@ -260,6 +294,18 @@ def on_pre_tool_call(
         reason = f"ASF check failed: {exc}"
 
     asf_latency_ms = int((time.monotonic() - t0) * 1000)
+
+    # Link only when the interceptor actually wrote a new terminal event for this call;
+    # an unchanged pointer means no audit row was produced (e.g. ASF check failed).
+    audit_hash = None
+    if auditor is not None:
+        try:
+            audit_hash_after = auditor.last_hash_for(_agent_id())
+            if audit_hash_after and audit_hash_after != audit_hash_before:
+                audit_hash = audit_hash_after
+        except Exception:
+            audit_hash = None
+
     try:
         _store().start_trace(
             agent_id=_agent_id(),
@@ -268,12 +314,14 @@ def on_pre_tool_call(
             tool_call_id=tool_call_id or None,
             hermes_tool_name=tool_name,
             asf_tool_name=asf_tool_name,
-            args=args,
+            # Persist redacted previews plus hashes only, never unredacted full text.
+            args=_redact_value(args),
             agent_model=_agent_model(),
             verdict=verdict,
             outcome=_outcome_from_verdict(verdict),
             reason=reason,
             asf_latency_ms=asf_latency_ms,
+            audit_hash=audit_hash,
         )
     except Exception:
         if _env_bool("ASF_HERMES_FAIL_CLOSED", False):
@@ -311,6 +359,12 @@ def on_post_tool_call(
     if not _enabled() or not tool_name:
         return
 
+    if result is None:
+        for key in ("result", "output", "response", "tool_output"):
+            if key in kwargs:
+                result = kwargs.get(key)
+                break
+
     if duration_ms is None:
         for key in ("tool_duration_ms", "elapsed_ms", "latency_ms"):
             value = kwargs.get(key)
@@ -319,13 +373,16 @@ def on_post_tool_call(
                 break
 
     output_risky, output_reason = _detect_output_risk(result)
+    persisted_result = _redact_value(result)
     output_verdict = "DENY" if output_risky else None
     try:
         _store().finish_trace(
             tool_call_id=tool_call_id or None,
             session_id=session_id or None,
             task_id=task_id or None,
-            result=result,
+            # output_preview stores a redacted, truncated preview plus output_hash.
+            # Native Claude Code hook outputs are not available here.
+            result=persisted_result,
             tool_duration_ms=duration_ms,
             side_effect_verified=False,
             side_effect_occurred=None,

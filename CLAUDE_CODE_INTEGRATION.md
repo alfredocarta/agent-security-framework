@@ -256,3 +256,12 @@ in the compliance dashboard at `http://localhost:8080`.
 Hook-blocked commands appear as `L1.5_BLOCK` or `BLOCKED` events in the
 session timeline and are counted in the EU AI Act compliance table under
 Art. 9 (Risk management).
+
+### Known transparency gap
+
+Claude Code native PreToolUse hooks currently persist only the ASF audit-chain
+reason and stage data in `audit_trail`. The hook receives the proposed tool
+input before execution, but there is no dedicated input/output evidence table
+for Claude Code yet. Native tool output is not available to PreToolUse hooks by
+design, so the dashboard must render input/output as `not recorded` for these
+rows. Hermes traces are the source of truth for redacted input/output previews.
