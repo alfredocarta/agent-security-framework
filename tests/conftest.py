@@ -31,7 +31,19 @@ def clean_state():
 @pytest.fixture(scope="session", autouse=True)
 def register_keys():
     for agent_id in AGENTS:
-        KA.register_agent(agent_id)
+        try:
+            KA.register_agent(agent_id)
+        except Exception:
+            # Existing encrypted test keys may have been created with a different
+            # temporary ASF_MASTER_KEY. Reset only the test agents so a local
+            # developer machine can run the suite deterministically.
+            from key_authority import KeyModel, KeySession
+
+            db = KeySession()
+            db.query(KeyModel).filter(KeyModel.agent_id == agent_id).delete()
+            db.commit()
+            db.close()
+            KA.register_agent(agent_id)
 
 def is_blocked(result):
     verdict, _ = result

@@ -19,6 +19,18 @@ agents:
       - communication
       - read_docs
 
+path_allowlist:
+  # Paths listed here are excluded from ML pipeline inspection on read-only tool calls
+  # (file_read, file_search, skill_read, memory_read). Write and execution tools are
+  # never bypassed regardless of path.
+  read_only_tools:
+    - file_read
+    - file_search
+    - skill_read
+    - memory_read
+  paths:
+    - /Users/alfredo/Projects/agent-security-evaluation/
+
 detection:
   block_threshold: 0.95   # Only block on near-certainty (Stage 2 is unreliable)
   pass_threshold: 0.05    # Only pass on near-certainty (force escalation otherwise)

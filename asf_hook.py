@@ -46,8 +46,28 @@ MAX_STDIN_BYTES = 256 * 1024
 _SOL_LOCAL      = 0
 _LOCAL_PEERPID  = 2
 
+def _edit_extractor(i):
+    parts = [f"path={i.get('file_path', '')}"]
+    if i.get("new_string") is not None:
+        parts.append(f"new={i.get('new_string', '')}")
+    for edit in i.get("edits", []) or []:
+        parts.append(f"new={edit.get('new_string', '')}")
+    return "\n".join(parts)
+
+
+# Native Claude Code tools routed through ASF. Map tool name -> (ASF tool category,
+# extractor that builds the text ASF inspects). Tools not listed are passed through
+# untouched. In monitor mode (default) every match is logged but never blocked.
 TOOL_MAP = {
-    "Bash": ("shell", lambda i: i.get("command", "")),
+    "Bash":         ("shell",       lambda i: i.get("command", "")),
+    "Read":         ("file_read",   lambda i: f"path={i.get('file_path', '')}"),
+    "Write":        ("file_write",  lambda i: f"path={i.get('file_path', '')}\ncontent={i.get('content', '')}"),
+    "Edit":         ("code_edit",   _edit_extractor),
+    "MultiEdit":    ("code_edit",   _edit_extractor),
+    "NotebookEdit": ("code_edit",   lambda i: f"path={i.get('notebook_path', '')}\nnew={i.get('new_source', '')}"),
+    "Glob":         ("file_search", lambda i: f"pattern={i.get('pattern', '')} path={i.get('path', '')}"),
+    "Grep":         ("file_search", lambda i: f"pattern={i.get('pattern', '')} path={i.get('path', '')}"),
+    "WebFetch":     ("web",         lambda i: f"url={i.get('url', '')} prompt={i.get('prompt', '')}"),
 }
 
 # Parsed passthrough: single command, no shell metacharacters, no substitution.
@@ -78,6 +98,9 @@ def _float_env(name: str, default: float, lo: float, hi: float) -> float:
 RETRIES         = _int_env("ASF_HOOK_RETRIES", 2, 0, 10)
 STARTUP_TIMEOUT = _float_env("ASF_HOOK_STARTUP_TIMEOUT", 10.0, 1.0, 60.0)
 FAIL_CLOSED     = os.environ.get("ASF_HOOK_FAIL_CLOSED", "false").lower() == "true"
+# Monitor mode (default): ASF logs every matched tool call to the audit trail but never
+# blocks. Set ASF_HOOK_MONITOR_ONLY=false to let DENY verdicts block the tool.
+MONITOR_ONLY    = os.environ.get("ASF_HOOK_MONITOR_ONLY", "true").lower() == "true"
 
 
 def is_bash_passthrough(command: str) -> bool:
@@ -339,6 +362,12 @@ def main():
             if verdict not in {"ALLOW", "DENY"}:
                 raise ValueError(f"invalid daemon verdict: {verdict!r}")
             reason = data.get("reason", "")
+            if MONITOR_ONLY:
+                # Observability only: the daemon already recorded this call in the audit
+                # trail. Never block, whatever the verdict.
+                if verdict == "DENY":
+                    print(f"[ASF monitor] would block {tool_name}: {reason}", file=sys.stderr, flush=True)
+                sys.exit(0)
             if verdict == "ALLOW":
                 sys.exit(0)
             print(f"[ASF {verdict}] {reason}", flush=True)

@@ -10,21 +10,25 @@ import unicodedata
 
 _MODEL = None
 
-_DEFAULT_MODEL = "deepset/deberta-v3-base-injection"
+_BASE_MODEL = "deepset/deberta-v3-base-injection"
+_FT_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "deberta-v3-injection-ft")
+# Prefer the fine-tuned model (FPR ~1%) when present. The HF base model has ~91% FPR
+# on instruction-format traffic and must not be the silent production default.
+_DEFAULT_MODEL = _FT_MODEL if os.path.isdir(_FT_MODEL) else _BASE_MODEL
 
 def _get_model():
     global _MODEL
     if _MODEL is None:
         from transformers import pipeline
-        model_name_or_path = os.environ.get("ASF_STAGE25_MODEL", "")
-        if not model_name_or_path:
+        model_name_or_path = os.environ.get("ASF_STAGE25_MODEL", "") or _DEFAULT_MODEL
+        if model_name_or_path == _BASE_MODEL:
             print(
-                "[ASF WARNING] ASF_STAGE25_MODEL is not set. Using default model "
-                f"'{_DEFAULT_MODEL}' which has 91% FPR on instruction-format traffic. "
-                "Set ASF_STAGE25_MODEL to the fine-tuned model path for production use.",
+                "[ASF WARNING] Stage 2.5 is using the base model "
+                f"'{_BASE_MODEL}' which has ~91% FPR on instruction-format traffic. "
+                "Provide the fine-tuned model at models/deberta-v3-injection-ft "
+                "or set ASF_STAGE25_MODEL for production use.",
                 file=sys.stderr,
             )
-            model_name_or_path = _DEFAULT_MODEL
         _MODEL = pipeline(
             "text-classification",
             model=model_name_or_path,

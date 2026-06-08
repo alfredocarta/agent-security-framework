@@ -82,7 +82,7 @@ try:
     registry.add_or_update_agent(
         AGENT_ID,
         risk_level="medium",
-        permissions=["shell", "file_read", "file_write", "file_search", "code_edit", "read_db"]
+        permissions=["shell", "file_read", "file_write", "file_search", "code_edit", "read_db", "web"]
     )
     print(f"[ASF daemon] agent {AGENT_ID!r} registered", file=sys.stderr, flush=True)
 except Exception as e:

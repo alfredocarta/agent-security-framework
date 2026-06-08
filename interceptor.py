@@ -302,39 +302,9 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
 
     heuristic_score = _classifier_gate_score(tool_input)
 
-    # NEW: ONNX as primary detector (deepset/opi optimization)
-    # Run ONNX on ALL inputs unless L1.5 is very confident (block or clear)
-    # This bypasses Stage 2 which has 60-96% FPR on external datasets
-    # ONNX parallel gate is disabled when ASF_ALWAYS_STAGE25=true to prevent
-    # ONNX SAFE from returning ALLOW before DeBERTa runs.
-    _always_stage25_active = os.environ.get("ASF_ALWAYS_STAGE25", "").lower() == "true"
-    if (not os.environ.get("ASF_DISABLE_STAGE3_ONNX_PARALLEL", "").lower() == "true"
-            and not _always_stage25_active):
-        try:
-            from stage3_onnx import classify_text as _onnx_classify
-
-            if heuristic_score >= 0.50:
-                pass
-            elif heuristic_score <= 0.02 and not probe_fired:
-                pass
-            else:
-                onnx_dangerous = _onnx_classify(tool_input)
-                if onnx_dangerous:
-                    AUDITOR.log_event(
-                        agent_id, tool_name, "ONNX_BLOCK",
-                        f"Blocked by ONNX (L1.5={heuristic_score:.2f}, probe={probe_fired})",
-                        trace_id=trace_id, latency_ms=latency_ms(), session_id=session_id,
-                    )
-                    return "DENY", "BLOCKED by ONNX Prompt Guard"
-                else:
-                    AUDITOR.log_event(
-                        agent_id, tool_name, "ONNX_CLEAR",
-                        f"Cleared by ONNX (L1.5={heuristic_score:.2f})",
-                        trace_id=trace_id, latency_ms=latency_ms(), session_id=session_id,
-                    )
-                    return "ALLOW", "Cleared by ONNX Prompt Guard"
-        except Exception:
-            pass  # ONNX unavailable, fall through to L1.5 logic
+    # L1.5 is only a fast-path gate. ONNX must remain the final Stage 3
+    # detector so the recorded pipeline stays L1.5 -> Stage 1 -> Stage 2 ->
+    # Stage 2.5 -> Stage 3 ONNX/LLM. Do not call ONNX from this fast-path.
 
     if heuristic_score >= HEURISTIC_BLOCK_THRESHOLD:
         _FASTPATH_STATS["HEURISTIC_BLOCK"] += 1
@@ -476,6 +446,16 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
         return "DENY", f"ACCESS DENIED: '{tool_name}' not authorized for {agent_id}."
 
+    _allowlist_cfg = _policies.get("path_allowlist", {})
+    _allowlist_read_tools = _allowlist_cfg.get("read_only_tools", [])
+    _allowlist_paths = _allowlist_cfg.get("paths", [])
+    if tool_name in _allowlist_read_tools and _allowlist_paths:
+        _input_str = str(tool_input)
+        if any(_input_str.startswith(p) for p in _allowlist_paths):
+            AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Path allowlist: read-only tool on trusted path",
+                              trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+            return "ALLOW", "Authorized (path allowlist)."
+
     if use_fastpath:
         fastpath_result = _heuristic_fastpath(
             agent_id, tool_name, tool_input, trace_id, _ms, session_id=session_id, probe_fired=probe_fired
@@ -585,7 +565,11 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                         metadata={"deberta_injection_score": stage25_score},
                     )
                 else:
-                    registry.suspend_agent(agent_id)
+                    # Stage 2.5 kill-switch blocks only this call by default; a single
+                    # DeBERTa false positive must not suspend the whole agent. Set
+                    # ASF_STAGE25_SUSPEND_ON_KILL=true to restore agent-wide suspension.
+                    if os.environ.get("ASF_STAGE25_SUSPEND_ON_KILL", "").lower() == "true":
+                        registry.suspend_agent(agent_id)
                     AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
                                       "KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa)",
                                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
@@ -610,7 +594,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                     print(f"[STAGE 2.5b] Prompt Guard verdict: {stage25b_verdict}", file=sys.stderr)
 
                     if stage25b_verdict == "DANGEROUS":
-                        registry.suspend_agent(agent_id)
+                        if os.environ.get("ASF_STAGE25_SUSPEND_ON_KILL", "").lower() == "true":
+                            registry.suspend_agent(agent_id)
                         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
                                           "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)",
                                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id)

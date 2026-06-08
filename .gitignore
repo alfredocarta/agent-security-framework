@@ -21,3 +21,9 @@ models/
 # IDE
 .vscode/
 .idea/
+
+# knowledge graph (generated, regenerate with `graphify update .`)
+graphify-out/
+
+# local agent state
+.claude/
