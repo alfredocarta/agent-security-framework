@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from trace_output_preview import output_preview_text as _shared_output_preview_text
+from trace_output_preview import truncate_preview_text
+
 
 DEFAULT_MAX_PREVIEW_BYTES = int(
     os.environ.get("ASF_HERMES_MAX_PREVIEW_BYTES")
@@ -83,69 +86,12 @@ def sha256_text(value: Any) -> str:
     return hashlib.sha256(stable_json(value).encode("utf-8", errors="replace")).hexdigest()
 
 
-def _truncate_preview_text(text: str, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str:
-    raw = text.encode("utf-8", errors="replace")
-    if len(raw) <= max_bytes:
-        return text
-    clipped = raw[:max_bytes].decode("utf-8", errors="ignore")
-    return f"{clipped}…[truncated {len(raw) - max_bytes} bytes]"
-
-
 def preview_value(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str:
-    return _truncate_preview_text(stable_json(value), max_bytes)
-
-
-def _looks_like_json_string(value: str) -> bool:
-    stripped = value.strip()
-    return bool(stripped) and stripped[0] in {"{", "[", '"'}
-
-
-def _unwrap_json_string(value: Any, max_depth: int = 3) -> Any:
-    current = value
-    for _ in range(max_depth):
-        if not isinstance(current, str) or not _looks_like_json_string(current):
-            break
-        try:
-            current = json.loads(current)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            break
-        if not isinstance(current, str):
-            break
-    return current
+    return truncate_preview_text(stable_json(value), max_bytes)
 
 
 def output_preview_text(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str:
-    unwrapped = _unwrap_json_string(value)
-    exit_code: Any = None
-    has_exit_code = False
-
-    if isinstance(unwrapped, dict):
-        has_exit_code = "exit_code" in unwrapped
-        exit_code = unwrapped.get("exit_code")
-        if unwrapped.get("output") is not None:
-            text = str(unwrapped.get("output"))
-        elif "stdout" in unwrapped or "stderr" in unwrapped:
-            stdout = unwrapped.get("stdout")
-            stderr = unwrapped.get("stderr")
-            text = "" if stdout is None else str(stdout)
-            if stderr is not None and str(stderr) != "":
-                text = f"{text}\nstderr: {stderr}"
-        else:
-            text = stable_json(unwrapped)
-    elif isinstance(unwrapped, str):
-        text = unwrapped
-    else:
-        text = stable_json(unwrapped)
-
-    if has_exit_code:
-        try:
-            is_non_zero = int(exit_code) != 0
-        except (TypeError, ValueError):
-            is_non_zero = exit_code not in (None, "", 0)
-        if is_non_zero:
-            text = f"{text}\nexit_code: {exit_code}"
-
-    return _truncate_preview_text(text, max_bytes)
+    return _shared_output_preview_text(value, max_bytes)
 
 
 def _sqlite_path_from_url(database_url: str) -> Path | None:

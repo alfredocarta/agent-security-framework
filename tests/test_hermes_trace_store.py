@@ -160,6 +160,36 @@ def test_output_preview_keeps_plain_string_as_is(tmp_path):
     assert row["output_hash"] == sha256_text(result)
 
 
+def test_output_preview_extracts_top_level_content(tmp_path):
+    from hermes_trace_store import sha256_text
+
+    result = {"content": "readable content", "type": "text"}
+    row = _stored_output_preview(tmp_path, result)
+
+    assert row["output_preview"] == "readable content"
+    assert row["output_hash"] == sha256_text(result)
+
+
+def test_output_preview_extracts_nested_file_content(tmp_path):
+    from hermes_trace_store import sha256_text
+
+    result = {"file": {"content": "file body", "filePath": "a.txt"}, "type": "text"}
+    row = _stored_output_preview(tmp_path, result)
+
+    assert row["output_preview"] == "file body"
+    assert row["output_hash"] == sha256_text(result)
+
+
+def test_output_preview_unknown_dict_uses_pretty_json(tmp_path):
+    from hermes_trace_store import sha256_text
+
+    result = {"z": 1, "a": {"b": 2}}
+    row = _stored_output_preview(tmp_path, result)
+
+    assert row["output_preview"] == '{\n  "a": {\n    "b": 2\n  },\n  "z": 1\n}'
+    assert row["output_hash"] == sha256_text(result)
+
+
 def test_output_preview_truncates_plain_text_after_unwrapping():
     from hermes_trace_store import output_preview_text
 

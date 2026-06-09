@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from trace_output_preview import output_preview_text as _shared_output_preview_text
+
 
 DEFAULT_MAX_PREVIEW_BYTES = int(os.environ.get("ASF_HOOK_MAX_PREVIEW_BYTES", "8192"))
 AGENT_ID = "claude-code-agent"
@@ -105,6 +107,10 @@ def preview_value(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str
         return text
     clipped = raw[:max_bytes].decode("utf-8", errors="ignore")
     return f"{clipped}...[truncated {len(raw) - max_bytes} bytes]"
+
+
+def output_preview_text(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str:
+    return _shared_output_preview_text(value, max_bytes)
 
 
 def _sqlite_path_from_url(database_url: str) -> Path | None:
@@ -248,7 +254,7 @@ class ClaudeTraceStore:
         if not where:
             return 0
         redacted_result = redact_value(result)
-        values: list[Any] = [sha256_text(redacted_result), preview_value(redacted_result)]
+        values: list[Any] = [sha256_text(redacted_result), output_preview_text(redacted_result)]
         values.extend(params)
         with self._lock, self._connect() as conn:
             cur = conn.execute(
