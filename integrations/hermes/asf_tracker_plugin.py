@@ -49,6 +49,8 @@ if not (DEFAULT_ASF_ROOT / "interceptor.py").exists():
         file=sys.stderr,
     )
 
+from wrapper import asf_core
+
 _AGENT_REGISTERED = False
 _TRACE_BY_CALL_KEY: dict[tuple[str, str, str], str] = {}
 _TRACE_LOCK = threading.Lock()
@@ -87,22 +89,11 @@ SECRET_PATTERNS = (
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return asf_core.env_bool(name, default)
 
 
 def _env_list(name: str) -> list[str]:
-    raw = os.environ.get(name, "")
-    if not raw.strip():
-        return []
-    values: list[str] = []
-    for part in re.split(r"[,\n]", raw):
-        value = part.strip()
-        if value:
-            values.append(value)
-    return values
+    return asf_core.env_list(name)
 
 
 def _mode() -> str:
@@ -137,53 +128,30 @@ def _agent_model() -> str | None:
 
 
 def normalize_tool_name(tool_name: str) -> str:
-    if tool_name in TOOL_MAP:
-        return TOOL_MAP[tool_name]
-    for prefix, mapped in PREFIX_MAP.items():
-        if tool_name.startswith(prefix):
-            return mapped
-    return tool_name
+    return asf_core.normalize_tool_name(tool_name, TOOL_MAP, PREFIX_MAP)
 
 
 def _redact_text(text: str) -> str:
-    redacted = text
-    for pattern in SECRET_PATTERNS:
-        redacted = pattern.sub("[REDACTED_SECRET]", redacted)
-    canary = os.environ.get("ASF_HERMES_CANARY")
-    if canary:
-        redacted = redacted.replace(canary, "[REDACTED_CANARY]")
-    return redacted
+    return asf_core.redact_text(text)
 
 
 def _redact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return _redact_text(value)
-    if isinstance(value, dict):
-        return {k: _redact_value(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_value(v) for v in value)
-    return value
+    return asf_core.redact_value(value)
 
 
 def _safe_preview(value: Any, max_chars: int | None = None) -> str:
-    max_chars = max_chars or int(os.environ.get("ASF_HERMES_MAX_ARG_BYTES", "8192"))
-    text = _redact_text(str(value))
-    if len(text) <= max_chars:
-        return text
-    return f"{text[:max_chars]}...[truncated {len(text) - max_chars} chars]"
+    return asf_core.safe_preview(value, max_chars)
 
 def _stable_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    return asf_core.stable_json(value)
 
 
 def _args_hash(args: Any) -> str:
-    return hashlib.sha256(_stable_json(args).encode("utf-8", errors="replace")).hexdigest()
+    return asf_core.args_hash(args)
 
 
 def _call_key(task_id: str, tool_name: str, args: dict[str, Any] | None) -> tuple[str, str, str]:
-    return (task_id or "", tool_name or "", _args_hash(_redact_value(args or {})))
+    return asf_core.call_key(task_id, tool_name, args)
 
 
 def build_security_text(tool_name: str, args: dict[str, Any] | None) -> str:
@@ -258,42 +226,23 @@ def register_hermes_agent() -> None:
 
 def run_asf_check(agent_id: str, tool_name: str, security_text: str, session_id: str | None = None) -> tuple[str, str]:
     register_hermes_agent()
-    from interceptor import hardened_interceptor
-
-    result = hardened_interceptor(agent_id, tool_name, security_text, session_id=session_id)
-    verdict = result[0] if len(result) > 0 else "DENY"
-    reason = result[1] if len(result) > 1 else "No reason returned"
-    return str(verdict), str(reason)
+    return asf_core.run_asf_check(agent_id, tool_name, security_text, session_id=session_id)
 
 
 def _store():
-    from hermes_trace_store import get_default_store, HermesTraceStore
-
-    explicit = os.environ.get("ASF_HERMES_DB")
-    if explicit:
-        return HermesTraceStore(explicit)
-    return get_default_store()
+    return asf_core.store_from_env("ASF_HERMES_DB")
 
 
 def _outcome_from_verdict(verdict: str) -> str:
-    verdict = verdict.upper()
-    if verdict == "ALLOW":
-        return "ALLOWED"
-    if verdict == "HITL":
-        return "HITL_REQUESTED"
-    if verdict == "DENY":
-        return "BLOCKED"
-    return verdict
+    return asf_core.outcome_from_verdict(verdict)
 
 
 def _block_directive(verdict: str, reason: str) -> dict[str, str]:
-    if verdict.upper() == "HITL":
-        return {"action": "block", "message": f"[ASF HITL] Human approval required: {reason}"}
-    return {"action": "block", "message": f"[ASF BLOCKED] {reason}"}
+    return asf_core.block_directive(verdict, reason)
 
 
 def _allow_directive_reason(kind: str, value: str) -> str:
-    return f"{kind} is outside ASF Hermes allowlist: {value}"
+    return asf_core.allow_directive_reason(kind, value)
 
 
 def _policy_block_directive(tool_name: str, reason: str) -> dict[str, str]:
@@ -307,80 +256,27 @@ def _policy_block_directive(tool_name: str, reason: str) -> dict[str, str]:
 
 
 def _command_from_shell(command: str) -> str:
-    try:
-        parts = shlex.split(command, posix=True)
-    except ValueError:
-        parts = command.strip().split()
-    if not parts:
-        return ""
-    first = parts[0]
-    if first in {"env", "command", "time", "timeout"} and len(parts) > 1:
-        first = parts[1]
-    return first
+    return asf_core.command_from_shell(command)
 
 
 def _is_command_allowed(command: str) -> bool:
-    allowed = _env_list("ASF_HERMES_CMD_ALLOW")
-    if not allowed:
-        return True
-    executable = _command_from_shell(command)
-    if not executable:
-        return True
-    executable_name = Path(executable).name
-    return executable in allowed or executable_name in allowed
+    return asf_core.is_command_allowed(command)
 
 
 def _path_allowed(path_value: str | None, *, write: bool = False) -> bool:
-    if not path_value:
-        return True
-    root = Path(_sandbox_workdir()).resolve()
-    candidate = Path(path_value).expanduser().resolve()
-    if write:
-        try:
-            candidate.relative_to(root)
-            return True
-        except Exception:
-            return False
-    allowed = [root]
-    allowed.extend(Path(p).expanduser().resolve() for p in _env_list("ASF_HERMES_PATH_ALLOW"))
-    for base in allowed:
-        try:
-            candidate.relative_to(base)
-            return True
-        except Exception:
-            continue
-    return False
+    return asf_core.path_allowed(path_value, write=write)
 
 
 def _hosts_in_text(text: str) -> set[str]:
-    hosts: set[str] = set()
-    for match in re.finditer(r"https?://[^\s'\"]+", text):
-        parsed = urlparse(match.group(0))
-        if parsed.hostname:
-            hosts.add(parsed.hostname.lower())
-    for flag in ("--connect-to", "--resolve"):
-        if flag in text:
-            hosts.add("dynamic-network-target")
-    return hosts
+    return asf_core.hosts_in_text(text)
 
 
 def _host_allowed(host: str, allowed: list[str]) -> bool:
-    host = host.lower().rstrip(".")
-    for item in allowed:
-        value = item.lower().rstrip(".")
-        if host == value or host.endswith(f".{value}"):
-            return True
-    return False
+    return asf_core.host_allowed(host, allowed)
 
 
 def _network_allowed_for_text(text: str) -> tuple[bool, str | None]:
-    allowed = _env_list("ASF_HERMES_NET_ALLOW")
-    if not allowed:
-        return True, None
-    for host in _hosts_in_text(text):
-        if not _host_allowed(host, allowed):
-            return False, host
-    return True, None
+    return asf_core.network_allowed_for_text(text)
 
 
 def _allowlist_block(tool_name: str, args: dict[str, Any]) -> dict[str, str] | None:
@@ -404,132 +300,43 @@ def _allowlist_block(tool_name: str, args: dict[str, Any]) -> dict[str, str] | N
 
 
 def _find_hitl_decision(event_hash: str) -> tuple[str, str] | None:
-    from registry import AuditModel, SessionLocal
-
-    marker = f"event:{event_hash}"
-    db = SessionLocal()
-    try:
-        row = (
-            db.query(AuditModel)
-            .filter(AuditModel.outcome.in_(["HITL_APPROVED", "HITL_REJECTED"]))
-            .filter(AuditModel.reason.contains(marker))
-            .order_by(AuditModel.timestamp.desc())
-            .first()
-        )
-        if row is None:
-            return None
-        return str(row.outcome), str(row.reason)
-    finally:
-        db.close()
+    return asf_core.find_hitl_decision(event_hash)
 
 
 def _wait_for_hitl_decision(event_hash: str, reason: str) -> tuple[bool, str]:
-    timeout_s = float(os.environ.get("ASF_HERMES_HITL_TIMEOUT", "300"))
-    poll_ms = int(os.environ.get("ASF_HERMES_HITL_POLL_MS", "1000"))
-    on_timeout = os.environ.get("ASF_HERMES_HITL_ON_TIMEOUT", "block").strip().lower()
-    deadline = time.monotonic() + max(timeout_s, 0.0)
-    print(f"[ASF HITL] Waiting for dashboard decision event:{event_hash}", file=sys.stderr)
-    while True:
-        decision = _find_hitl_decision(event_hash)
-        if decision is not None:
-            outcome, decision_reason = decision
-            if outcome == "HITL_APPROVED":
-                return True, f"HITL approved for event:{event_hash}: {decision_reason}"
-            return False, f"HITL rejected for event:{event_hash}: {decision_reason}"
-        if time.monotonic() >= deadline:
-            if on_timeout == "allow":
-                return True, f"HITL timeout allowed by ASF_HERMES_HITL_ON_TIMEOUT=allow for event:{event_hash}"
-            return False, f"HITL timeout blocked for event:{event_hash}: {reason}"
-        time.sleep(max(poll_ms, 1) / 1000.0)
+    return asf_core.wait_for_hitl_decision(event_hash, reason)
 
 
 def _sandbox_enabled() -> bool:
-    return _env_bool("ASF_HERMES_SANDBOX", False)
+    return asf_core.sandbox_enabled()
 
 
 def _sandbox_workdir() -> str:
-    configured = os.environ.get("ASF_HERMES_SANDBOX_WORKDIR")
-    if configured:
-        path = Path(configured).expanduser().resolve()
-    else:
-        path = Path(tempfile.gettempdir()) / "asf-hermes-sandbox" / (os.environ.get("ASF_HERMES_SESSION", "default"))
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
+    return asf_core.sandbox_workdir()
 
 
 def _sandbox_cwd(requested: str | None, root: str) -> str:
-    root_path = Path(root).resolve()
-    if requested:
-        candidate = Path(requested).expanduser().resolve()
-        try:
-            candidate.relative_to(root_path)
-            candidate.mkdir(parents=True, exist_ok=True)
-            return str(candidate)
-        except Exception:
-            pass
-    return str(root_path)
+    return asf_core.sandbox_cwd(requested, root)
 
 
 def _sandbox_argv(command: list[str]) -> tuple[list[str], str | None]:
-    sandbox_exec = shutil.which("sandbox-exec")
-    if not sandbox_exec:
-        warning = "sandbox-exec not available, executing without OS sandbox"
-        if _env_bool("ASF_HERMES_SANDBOX_FAIL_CLOSED", False):
-            raise RuntimeError(warning)
-        return command, warning
-    profile = DEFAULT_ASF_ROOT / "wrapper" / "asf_sandbox.sb"
-    read_allow = _env_list("ASF_HERMES_PATH_ALLOW")
-    read_allow_path = str(Path(read_allow[0]).expanduser().resolve()) if read_allow else _sandbox_workdir()
-    return [
-        sandbox_exec,
-        "-D",
-        f"WORKDIR={_sandbox_workdir()}",
-        "-D",
-        f"READ_ALLOW={read_allow_path}",
-        "-f",
-        str(profile),
-        *command,
-    ], None
+    return asf_core.sandbox_argv(command, asf_root=DEFAULT_ASF_ROOT)
+
+
+def _sandbox_env() -> dict[str, str]:
+    return asf_core.sandbox_env()
 
 
 def _run_sandboxed_process(command: list[str], *, cwd: str, timeout: int | None = None) -> dict[str, Any]:
-    argv, warning = _sandbox_argv(command)
-    completed = subprocess.run(
-        argv,
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        timeout=timeout or int(os.environ.get("ASF_HERMES_SANDBOX_TIMEOUT", "30")),
-        check=False,
-    )
-    output = completed.stdout
-    if completed.stderr:
-        output = f"{output}\n[stderr]\n{completed.stderr}" if output else f"[stderr]\n{completed.stderr}"
-    result: dict[str, Any] = {"output": output, "exit_code": completed.returncode, "sandboxed": warning is None}
-    if warning:
-        result["sandbox_warning"] = warning
-    return result
+    return asf_core.run_sandboxed_process(command, cwd=cwd, asf_root=DEFAULT_ASF_ROOT, timeout=timeout)
 
 
 def _sandbox_terminal(args: dict[str, Any]) -> str:
-    if args.get("background") or args.get("pty"):
-        return json.dumps({"error": "ASF sandbox MVP supports only foreground non-PTY terminal calls"})
-    root = _sandbox_workdir()
-    cwd = _sandbox_cwd(args.get("workdir"), root)
-    result = _run_sandboxed_process(
-        ["/bin/sh", "-c", str(args.get("command", ""))],
-        cwd=cwd,
-        timeout=args.get("timeout"),
-    )
-    return json.dumps(result, ensure_ascii=False)
+    return asf_core.sandbox_terminal(args, asf_root=DEFAULT_ASF_ROOT)
 
 
 def _sandbox_execute_code(args: dict[str, Any]) -> str:
-    root = _sandbox_workdir()
-    cwd = _sandbox_cwd(args.get("workdir"), root)
-    code = str(args.get("code", ""))
-    result = _run_sandboxed_process([sys.executable, "-c", code], cwd=cwd)
-    return json.dumps(result, ensure_ascii=False)
+    return asf_core.sandbox_execute_code(args, asf_root=DEFAULT_ASF_ROOT)
 
 
 def install_sandbox_dispatch() -> None:
@@ -577,59 +384,34 @@ def on_pre_tool_call(
     asf_tool_name = normalize_tool_name(tool_name)
     security_text = build_security_text(tool_name, args)
 
-    # Snapshot the agent's last audit hash so we can back-link this trace to the
-    # terminal audit_trail event the interceptor is about to write. The interceptor
-    # runs in this same process, so the auditor's in-memory pointer is exact.
-    auditor = None
-    audit_hash_before = None
-    try:
-        from audit import AUDITOR as auditor  # noqa: F401  (rebinds local)
-        audit_hash_before = auditor.last_hash_for(_agent_id())
-    except Exception:
-        auditor = None
-
-    t0 = time.monotonic()
-    verdict = "ALLOW"
-    reason = "ASF monitor disabled"
+    decision = asf_core.asf_decision(
+        agent_id=_agent_id(),
+        asf_tool=asf_tool_name,
+        security_text=security_text,
+        action_id=tool_call_id or task_id or None,
+        session_id=session_id or None,
+        check_fn=lambda agent_id, asf_tool, text, sid: run_asf_check(agent_id, asf_tool, text, session_id=sid),
+    )
+    verdict = decision.verdict
+    reason = decision.reason
+    audit_hash = decision.audit_hash
 
     try:
-        verdict, reason = run_asf_check(_agent_id(), asf_tool_name, security_text, session_id=session_id or None)
-    except Exception as exc:
-        verdict = "DENY" if _env_bool("ASF_HERMES_FAIL_CLOSED", False) else "ALLOW"
-        reason = f"ASF check failed: {exc}"
-
-    asf_latency_ms = int((time.monotonic() - t0) * 1000)
-
-    # Link only when the interceptor actually wrote a new terminal event for this call;
-    # an unchanged pointer means no audit row was produced (e.g. ASF check failed).
-    audit_hash = None
-    if auditor is not None:
-        try:
-            audit_hash_after = auditor.last_hash_for(_agent_id())
-            if audit_hash_after and audit_hash_after != audit_hash_before:
-                audit_hash = audit_hash_after
-        except Exception:
-            audit_hash = None
-
-    try:
-        trace_id = _store().start_trace(
+        asf_core.start_call_trace(
             agent_id=_agent_id(),
             session_id=session_id or None,
             task_id=task_id or None,
             tool_call_id=tool_call_id or None,
-            hermes_tool_name=tool_name,
+            source_tool_name=tool_name,
             asf_tool_name=asf_tool_name,
-            # Persist redacted previews plus hashes only, never unredacted full text.
-            args=_redact_value(args),
+            args=args,
             agent_model=_agent_model(),
             verdict=verdict,
             outcome=_outcome_from_verdict(verdict),
             reason=reason,
-            asf_latency_ms=asf_latency_ms,
+            latency_ms=decision.latency_ms,
             audit_hash=audit_hash,
         )
-        with _TRACE_LOCK:
-            _TRACE_BY_CALL_KEY[_call_key(task_id, tool_name, args)] = trace_id
     except Exception:
         if _env_bool("ASF_HERMES_FAIL_CLOSED", False):
             return {"action": "block", "message": "[ASF BLOCKED] failed to persist Hermes trace"}
@@ -650,14 +432,7 @@ def on_pre_tool_call(
 
 
 def _detect_output_risk(result: Any) -> tuple[bool, str]:
-    text = str(result)
-    for pattern in SECRET_PATTERNS:
-        if pattern.search(text):
-            return True, f"Sensitive output matched pattern {pattern.pattern[:40]}"
-    canary = os.environ.get("ASF_HERMES_CANARY")
-    if canary and canary in text:
-        return True, "Canary value appeared in tool output"
-    return False, ""
+    return asf_core.detect_output_risk(result)
 
 
 def on_post_tool_call(
@@ -688,21 +463,16 @@ def on_post_tool_call(
                 break
 
     output_risky, output_reason = _detect_output_risk(result)
-    persisted_result = _redact_value(result)
     output_verdict = "DENY" if output_risky else None
-    trace_id = None
-    with _TRACE_LOCK:
-        trace_id = _TRACE_BY_CALL_KEY.pop(_call_key(task_id, tool_name, args), None)
     try:
-        _store().finish_trace(
+        asf_core.finish_call_trace(
             tool_call_id=tool_call_id or None,
             session_id=session_id or None,
             task_id=task_id or None,
-            trace_id=trace_id,
-            # output_preview stores a redacted, truncated preview plus output_hash.
-            # Native Claude Code hook outputs are not available here.
-            result=persisted_result,
-            tool_duration_ms=duration_ms,
+            source_tool_name=tool_name,
+            args=args,
+            result=result,
+            duration_ms=duration_ms,
             side_effect_verified=False,
             side_effect_occurred=None,
             output_verdict=output_verdict,

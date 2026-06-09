@@ -55,6 +55,8 @@ def _sandbox_command(command: str, workdir: str) -> tuple[list[str], str | None]
         f"WORKDIR={workdir}",
         "-D",
         f"READ_ALLOW={workdir}",
+        "-D",
+        f"PROXY_PORT={os.environ.get('ASF_EGRESS_PROXY_PORT', '9')}",
         "-f",
         str(profile),
         "/bin/sh",

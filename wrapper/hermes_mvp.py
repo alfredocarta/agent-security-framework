@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from wrapper.asf_egress_proxy import EgressPolicy, parse_csv, parse_host_map, serve
+
 ASF_ROOT = Path(__file__).resolve().parents[1]
 REPO_PLUGIN = ASF_ROOT / "integrations" / "hermes" / "asf_tracker_plugin.py"
 DEPLOYED_PLUGIN = Path.home() / ".hermes" / "plugins" / "asf-tracker" / "__init__.py"
@@ -27,6 +29,7 @@ def build_env(
     cmd_allow: str | None = None,
     path_allow: str | None = None,
     net_allow: str | None = None,
+    proxy_port: int | None = None,
 ) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
@@ -45,6 +48,8 @@ def build_env(
         env["ASF_HERMES_PATH_ALLOW"] = path_allow
     if net_allow is not None:
         env["ASF_HERMES_NET_ALLOW"] = net_allow
+    if proxy_port is not None:
+        env["ASF_EGRESS_PROXY_PORT"] = str(proxy_port)
     return env
 
 
@@ -89,7 +94,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--net-allow",
         default=os.environ.get("ASF_HERMES_NET_ALLOW"),
-        help="Comma separated domain allowlist enforced at ASF intent level. OS network stays denied in sandbox.",
+        help="Comma separated domain allowlist enforced by ASF intent checks and the local egress proxy.",
+    )
+    parser.add_argument(
+        "--egress-proxy-port",
+        type=int,
+        default=int(os.environ.get("ASF_EGRESS_PROXY_PORT", "0")),
+        help="Local ASF egress proxy port. Use 0 to choose a free port.",
+    )
+    parser.add_argument(
+        "--egress-host-map",
+        default=os.environ.get("ASF_EGRESS_HOST_MAP", ""),
+        help="Test/dev mapping domain=ip[:port] used by the ASF egress proxy.",
     )
     parser.add_argument("hermes_args", nargs=argparse.REMAINDER, help="Arguments passed to hermes.")
     args = parser.parse_args(argv)
@@ -107,6 +123,13 @@ def main(argv: list[str] | None = None) -> int:
     if not hermes_args:
         hermes_args = ["chat"]
 
+    proxy_server = None
+    proxy_port = None
+    if not args.no_sandbox and args.net_allow:
+        policy = EgressPolicy(parse_csv(args.net_allow), parse_host_map(args.egress_host_map))
+        proxy_server = serve("127.0.0.1", args.egress_proxy_port, policy)
+        proxy_port = int(proxy_server.server_address[1])
+
     env = build_env(
         args.mode,
         workdir,
@@ -114,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd_allow=args.cmd_allow,
         path_allow=args.path_allow,
         net_allow=args.net_allow,
+        proxy_port=proxy_port,
     )
     print(
         f"[ASF Hermes wrapper] mode={args.mode} sandbox={not args.no_sandbox} workdir={workdir}",
@@ -127,12 +151,24 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     if args.net_allow:
-        print(
-            "[ASF Hermes wrapper] net allowlist is ASF intent-level in this MVP; sandbox-exec denies OS network",
-            file=sys.stderr,
-        )
+        if proxy_port is not None:
+            print(
+                f"[ASF Hermes wrapper] egress proxy active on 127.0.0.1:{proxy_port}; "
+                "tool subprocess network is OS-limited to the proxy and domains are proxy-enforced",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "[ASF Hermes wrapper] net allowlist is ASF intent-level only because sandbox/proxy is disabled",
+                file=sys.stderr,
+            )
 
-    return subprocess.call([hermes, *hermes_args], env=env)
+    try:
+        return subprocess.call([hermes, *hermes_args], env=env)
+    finally:
+        if proxy_server is not None:
+            proxy_server.shutdown()
+            proxy_server.server_close()
 
 
 if __name__ == "__main__":
