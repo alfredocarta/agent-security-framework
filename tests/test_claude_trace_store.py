@@ -41,7 +41,7 @@ def test_claude_output_preview_summarizes_edit_envelope(tmp_path):
     }
     row = _stored_claude_output_preview(tmp_path, result)
 
-    assert row["output_preview"] == "/tmp/a.py\n\nold:\nx = 1\n\nnew:\nx = 2"
+    assert row["output_preview"] == "oldString:\nx = 1\n\nnewString:\nx = 2"
     assert "originalFile" not in row["output_preview"]
     assert "very long original file body" not in row["output_preview"]
     assert row["output_hash"] == sha256_text(redact_value(result))
