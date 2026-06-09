@@ -19,7 +19,15 @@ def sync_plugin() -> None:
     shutil.copyfile(REPO_PLUGIN, DEPLOYED_PLUGIN)
 
 
-def build_env(mode: str, workdir: str, sandbox: bool) -> dict[str, str]:
+def build_env(
+    mode: str,
+    workdir: str,
+    sandbox: bool,
+    *,
+    cmd_allow: str | None = None,
+    path_allow: str | None = None,
+    net_allow: str | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -31,6 +39,12 @@ def build_env(mode: str, workdir: str, sandbox: bool) -> dict[str, str]:
             "ASF_STAGE3_BACKEND": env.get("ASF_STAGE3_BACKEND", "onnx"),
         }
     )
+    if cmd_allow is not None:
+        env["ASF_HERMES_CMD_ALLOW"] = cmd_allow
+    if path_allow is not None:
+        env["ASF_HERMES_PATH_ALLOW"] = path_allow
+    if net_allow is not None:
+        env["ASF_HERMES_NET_ALLOW"] = net_allow
     return env
 
 
@@ -62,6 +76,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Do not copy the vendored plugin to ~/.hermes/plugins/asf-tracker before launch.",
     )
+    parser.add_argument(
+        "--cmd-allow",
+        default=os.environ.get("ASF_HERMES_CMD_ALLOW"),
+        help="Comma separated executable allowlist enforced by the ASF Hermes plugin.",
+    )
+    parser.add_argument(
+        "--path-allow",
+        default=os.environ.get("ASF_HERMES_PATH_ALLOW"),
+        help="Comma separated readable path allowlist. Writes remain confined to workdir.",
+    )
+    parser.add_argument(
+        "--net-allow",
+        default=os.environ.get("ASF_HERMES_NET_ALLOW"),
+        help="Comma separated domain allowlist enforced at ASF intent level. OS network stays denied in sandbox.",
+    )
     parser.add_argument("hermes_args", nargs=argparse.REMAINDER, help="Arguments passed to hermes.")
     args = parser.parse_args(argv)
 
@@ -78,13 +107,30 @@ def main(argv: list[str] | None = None) -> int:
     if not hermes_args:
         hermes_args = ["chat"]
 
-    env = build_env(args.mode, workdir, sandbox=not args.no_sandbox)
+    env = build_env(
+        args.mode,
+        workdir,
+        sandbox=not args.no_sandbox,
+        cmd_allow=args.cmd_allow,
+        path_allow=args.path_allow,
+        net_allow=args.net_allow,
+    )
     print(
         f"[ASF Hermes wrapper] mode={args.mode} sandbox={not args.no_sandbox} workdir={workdir}",
         file=sys.stderr,
     )
     if args.mode == "monitor":
         print("[ASF Hermes wrapper] monitor mode kill-switch active: ASF logs but does not veto", file=sys.stderr)
+    else:
+        print(
+            "[ASF Hermes wrapper] HITL pauses pre-tool calls until dashboard approval, rejection, or timeout",
+            file=sys.stderr,
+        )
+    if args.net_allow:
+        print(
+            "[ASF Hermes wrapper] net allowlist is ASF intent-level in this MVP; sandbox-exec denies OS network",
+            file=sys.stderr,
+        )
 
     return subprocess.call([hermes, *hermes_args], env=env)
 

@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import shutil
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -171,6 +173,161 @@ def test_pre_hook_enforce_blocks_deny(monkeypatch, tmp_path):
     )
 
     assert result == {"action": "block", "message": "[ASF BLOCKED] test deny"}
+
+
+def _hitl_fake_check_with_audit(plugin, event_hash_box):
+    def fake_check(agent_id, tool_name, security_text, session_id=None):
+        from audit import AUDITOR
+
+        AUDITOR.log_event(
+            agent_id,
+            tool_name,
+            "HITL_REQUESTED",
+            "test HITL request",
+            session_id=session_id,
+        )
+        event_hash_box["hash"] = AUDITOR.last_hash_for(agent_id)
+        return "HITL", "test HITL"
+
+    return fake_check
+
+
+def _decide_when_event_hash_exists(event_hash_box, outcome):
+    from audit import AUDITOR
+
+    for _ in range(200):
+        event_hash = event_hash_box.get("hash")
+        if event_hash:
+            AUDITOR.log_event("human-reviewer", "hitl", outcome, f"event:{event_hash} test decision")
+            return
+        time.sleep(0.005)
+
+
+def test_pre_hook_enforce_hitl_approve_waits_then_allows(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    event_hash_box = {}
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.setenv("ASF_HERMES_HITL_TIMEOUT", "2")
+    monkeypatch.setenv("ASF_HERMES_HITL_POLL_MS", "10")
+    monkeypatch.setattr(plugin, "run_asf_check", _hitl_fake_check_with_audit(plugin, event_hash_box))
+
+    reviewer = threading.Thread(
+        target=_decide_when_event_hash_exists,
+        args=(event_hash_box, "HITL_APPROVED"),
+    )
+    reviewer.start()
+    result = plugin.on_pre_tool_call(tool_name="terminal", args={"command": "echo ok"}, task_id="hitl-approve")
+    reviewer.join(timeout=2)
+
+    assert result is None
+    assert event_hash_box.get("hash")
+
+
+def test_pre_hook_enforce_hitl_reject_waits_then_blocks(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    event_hash_box = {}
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.setenv("ASF_HERMES_HITL_TIMEOUT", "2")
+    monkeypatch.setenv("ASF_HERMES_HITL_POLL_MS", "10")
+    monkeypatch.setattr(plugin, "run_asf_check", _hitl_fake_check_with_audit(plugin, event_hash_box))
+
+    reviewer = threading.Thread(
+        target=_decide_when_event_hash_exists,
+        args=(event_hash_box, "HITL_REJECTED"),
+    )
+    reviewer.start()
+    result = plugin.on_pre_tool_call(tool_name="terminal", args={"command": "echo no"}, task_id="hitl-reject")
+    reviewer.join(timeout=2)
+
+    assert result is not None
+    assert result["action"] == "block"
+    assert "HITL rejected" in result["message"]
+
+
+def test_pre_hook_enforce_hitl_timeout_policy(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    event_hash_box = {}
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.setenv("ASF_HERMES_HITL_TIMEOUT", "0.01")
+    monkeypatch.setenv("ASF_HERMES_HITL_POLL_MS", "1")
+    monkeypatch.setenv("ASF_HERMES_HITL_ON_TIMEOUT", "block")
+    monkeypatch.setattr(plugin, "run_asf_check", _hitl_fake_check_with_audit(plugin, event_hash_box))
+
+    result = plugin.on_pre_tool_call(tool_name="terminal", args={"command": "echo timeout"}, task_id="hitl-timeout")
+    assert result is not None
+    assert result["action"] == "block"
+    assert "timeout" in result["message"].lower()
+
+    monkeypatch.setenv("ASF_HERMES_HITL_ON_TIMEOUT", "allow")
+    result = plugin.on_pre_tool_call(tool_name="terminal", args={"command": "echo timeout"}, task_id="hitl-timeout-allow")
+    assert result is None
+
+
+def test_pre_hook_monitor_hitl_does_not_wait(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *args, **kwargs: ("HITL", "test HITL"))
+
+    start = time.monotonic()
+    result = plugin.on_pre_tool_call(tool_name="terminal", args={"command": "echo monitor"})
+
+    assert result is None
+    assert time.monotonic() - start < 0.5
+
+
+def test_allowlist_blocks_command_path_and_network(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+
+    sandbox_root = tmp_path / "sandbox"
+    allowed_read = tmp_path / "allowed"
+    allowed_read.mkdir()
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_WORKDIR", str(sandbox_root))
+    monkeypatch.setenv("ASF_HERMES_CMD_ALLOW", "echo,python")
+    monkeypatch.setenv("ASF_HERMES_PATH_ALLOW", str(allowed_read))
+    monkeypatch.setenv("ASF_HERMES_NET_ALLOW", "example.com")
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *args, **kwargs: ("ALLOW", "test allow"))
+
+    assert plugin.on_pre_tool_call(tool_name="terminal", args={"command": "echo ok"}) is None
+
+    blocked_cmd = plugin.on_pre_tool_call(tool_name="terminal", args={"command": "curl https://example.com"})
+    assert blocked_cmd is not None
+    assert "command" in blocked_cmd["message"]
+
+    blocked_path = plugin.on_pre_tool_call(tool_name="read_file", args={"path": str(tmp_path / "secret.txt")})
+    assert blocked_path is not None
+    assert "path" in blocked_path["message"]
+
+    assert plugin.on_pre_tool_call(tool_name="read_file", args={"path": str(allowed_read / "ok.txt")}) is None
+
+
+def test_allowlist_blocks_unapproved_network_destination(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_CMD_ALLOW", "curl")
+    monkeypatch.setenv("ASF_HERMES_NET_ALLOW", "example.com")
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *args, **kwargs: ("ALLOW", "test allow"))
+
+    result = plugin.on_pre_tool_call(tool_name="terminal", args={"command": "curl https://evil.test/path"})
+    assert result is not None
+    assert result["action"] == "block"
+    assert "network destination" in result["message"]
+
+    assert plugin.on_pre_tool_call(tool_name="terminal", args={"command": "curl https://sub.example.com"}) is None
 
 
 def test_pre_hook_enforce_real_asf_blocks_without_side_effect(monkeypatch, tmp_path):

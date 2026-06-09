@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 def _resolve_asf_root() -> Path:
@@ -89,6 +91,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_list(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return []
+    values: list[str] = []
+    for part in re.split(r"[,\n]", raw):
+        value = part.strip()
+        if value:
+            values.append(value)
+    return values
 
 
 def _mode() -> str:
@@ -278,6 +292,157 @@ def _block_directive(verdict: str, reason: str) -> dict[str, str]:
     return {"action": "block", "message": f"[ASF BLOCKED] {reason}"}
 
 
+def _allow_directive_reason(kind: str, value: str) -> str:
+    return f"{kind} is outside ASF Hermes allowlist: {value}"
+
+
+def _policy_block_directive(tool_name: str, reason: str) -> dict[str, str]:
+    try:
+        from audit import AUDITOR
+
+        AUDITOR.log_event(_agent_id(), normalize_tool_name(tool_name), "BLOCKED", reason)
+    except Exception:
+        pass
+    return _block_directive("DENY", reason)
+
+
+def _command_from_shell(command: str) -> str:
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        parts = command.strip().split()
+    if not parts:
+        return ""
+    first = parts[0]
+    if first in {"env", "command", "time", "timeout"} and len(parts) > 1:
+        first = parts[1]
+    return first
+
+
+def _is_command_allowed(command: str) -> bool:
+    allowed = _env_list("ASF_HERMES_CMD_ALLOW")
+    if not allowed:
+        return True
+    executable = _command_from_shell(command)
+    if not executable:
+        return True
+    executable_name = Path(executable).name
+    return executable in allowed or executable_name in allowed
+
+
+def _path_allowed(path_value: str | None, *, write: bool = False) -> bool:
+    if not path_value:
+        return True
+    root = Path(_sandbox_workdir()).resolve()
+    candidate = Path(path_value).expanduser().resolve()
+    if write:
+        try:
+            candidate.relative_to(root)
+            return True
+        except Exception:
+            return False
+    allowed = [root]
+    allowed.extend(Path(p).expanduser().resolve() for p in _env_list("ASF_HERMES_PATH_ALLOW"))
+    for base in allowed:
+        try:
+            candidate.relative_to(base)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _hosts_in_text(text: str) -> set[str]:
+    hosts: set[str] = set()
+    for match in re.finditer(r"https?://[^\s'\"]+", text):
+        parsed = urlparse(match.group(0))
+        if parsed.hostname:
+            hosts.add(parsed.hostname.lower())
+    for flag in ("--connect-to", "--resolve"):
+        if flag in text:
+            hosts.add("dynamic-network-target")
+    return hosts
+
+
+def _host_allowed(host: str, allowed: list[str]) -> bool:
+    host = host.lower().rstrip(".")
+    for item in allowed:
+        value = item.lower().rstrip(".")
+        if host == value or host.endswith(f".{value}"):
+            return True
+    return False
+
+
+def _network_allowed_for_text(text: str) -> tuple[bool, str | None]:
+    allowed = _env_list("ASF_HERMES_NET_ALLOW")
+    if not allowed:
+        return True, None
+    for host in _hosts_in_text(text):
+        if not _host_allowed(host, allowed):
+            return False, host
+    return True, None
+
+
+def _allowlist_block(tool_name: str, args: dict[str, Any]) -> dict[str, str] | None:
+    if tool_name == "terminal":
+        command = str(args.get("command", ""))
+        if not _is_command_allowed(command):
+            return _policy_block_directive(tool_name, _allow_directive_reason("command", _command_from_shell(command)))
+        ok, host = _network_allowed_for_text(command)
+        if not ok and host:
+            return _policy_block_directive(tool_name, _allow_directive_reason("network destination", host))
+    elif tool_name == "execute_code":
+        ok, host = _network_allowed_for_text(str(args.get("code", "")))
+        if not ok and host:
+            return _policy_block_directive(tool_name, _allow_directive_reason("network destination", host))
+
+    if tool_name in {"read_file", "write_file", "patch", "search_files"}:
+        path = args.get("path")
+        if isinstance(path, str) and not _path_allowed(path, write=tool_name in {"write_file", "patch"}):
+            return _policy_block_directive(tool_name, _allow_directive_reason("path", path))
+    return None
+
+
+def _find_hitl_decision(event_hash: str) -> tuple[str, str] | None:
+    from registry import AuditModel, SessionLocal
+
+    marker = f"event:{event_hash}"
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(AuditModel)
+            .filter(AuditModel.outcome.in_(["HITL_APPROVED", "HITL_REJECTED"]))
+            .filter(AuditModel.reason.contains(marker))
+            .order_by(AuditModel.timestamp.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return str(row.outcome), str(row.reason)
+    finally:
+        db.close()
+
+
+def _wait_for_hitl_decision(event_hash: str, reason: str) -> tuple[bool, str]:
+    timeout_s = float(os.environ.get("ASF_HERMES_HITL_TIMEOUT", "300"))
+    poll_ms = int(os.environ.get("ASF_HERMES_HITL_POLL_MS", "1000"))
+    on_timeout = os.environ.get("ASF_HERMES_HITL_ON_TIMEOUT", "block").strip().lower()
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    print(f"[ASF HITL] Waiting for dashboard decision event:{event_hash}", file=sys.stderr)
+    while True:
+        decision = _find_hitl_decision(event_hash)
+        if decision is not None:
+            outcome, decision_reason = decision
+            if outcome == "HITL_APPROVED":
+                return True, f"HITL approved for event:{event_hash}: {decision_reason}"
+            return False, f"HITL rejected for event:{event_hash}: {decision_reason}"
+        if time.monotonic() >= deadline:
+            if on_timeout == "allow":
+                return True, f"HITL timeout allowed by ASF_HERMES_HITL_ON_TIMEOUT=allow for event:{event_hash}"
+            return False, f"HITL timeout blocked for event:{event_hash}: {reason}"
+        time.sleep(max(poll_ms, 1) / 1000.0)
+
+
 def _sandbox_enabled() -> bool:
     return _env_bool("ASF_HERMES_SANDBOX", False)
 
@@ -313,7 +478,18 @@ def _sandbox_argv(command: list[str]) -> tuple[list[str], str | None]:
             raise RuntimeError(warning)
         return command, warning
     profile = DEFAULT_ASF_ROOT / "wrapper" / "asf_sandbox.sb"
-    return [sandbox_exec, "-D", f"WORKDIR={_sandbox_workdir()}", "-f", str(profile), *command], None
+    read_allow = _env_list("ASF_HERMES_PATH_ALLOW")
+    read_allow_path = str(Path(read_allow[0]).expanduser().resolve()) if read_allow else _sandbox_workdir()
+    return [
+        sandbox_exec,
+        "-D",
+        f"WORKDIR={_sandbox_workdir()}",
+        "-D",
+        f"READ_ALLOW={read_allow_path}",
+        "-f",
+        str(profile),
+        *command,
+    ], None
 
 
 def _run_sandboxed_process(command: list[str], *, cwd: str, timeout: int | None = None) -> dict[str, Any]:
@@ -393,6 +569,11 @@ def on_pre_tool_call(
     install_sandbox_dispatch()
 
     args = args if isinstance(args, dict) else {}
+    if _mode() == "enforce":
+        allowlist_decision = _allowlist_block(tool_name, args)
+        if allowlist_decision is not None:
+            return allowlist_decision
+
     asf_tool_name = normalize_tool_name(tool_name)
     security_text = build_security_text(tool_name, args)
 
@@ -453,8 +634,16 @@ def on_pre_tool_call(
         if _env_bool("ASF_HERMES_FAIL_CLOSED", False):
             return {"action": "block", "message": "[ASF BLOCKED] failed to persist Hermes trace"}
 
-    if _mode() == "enforce" and verdict.upper() in {"DENY", "HITL"}:
-        return _block_directive(verdict, reason)
+    if _mode() == "enforce":
+        if verdict.upper() == "DENY":
+            return _block_directive(verdict, reason)
+        if verdict.upper() == "HITL":
+            if not audit_hash:
+                return _block_directive("HITL", f"No HITL event hash available: {reason}")
+            approved, decision_reason = _wait_for_hitl_decision(audit_hash, reason)
+            if approved:
+                return None
+            return _block_directive("HITL", decision_reason)
     if verdict.upper() == "DENY" and _env_bool("ASF_HERMES_FAIL_CLOSED", False):
         return _block_directive(verdict, reason)
     return None

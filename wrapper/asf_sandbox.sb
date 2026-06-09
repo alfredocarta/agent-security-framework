@@ -1,6 +1,9 @@
-; ASF wrapper spike sandbox profile for macOS sandbox-exec.
-; sandbox-exec is deprecated by Apple. This profile is a feasibility probe only.
+; ASF Hermes wrapper sandbox profile for macOS sandbox-exec.
+; sandbox-exec is deprecated by Apple. This is a feasibility probe only.
 ; It is opt-in and intended only for synthetic test commands, not for a real user shell.
+; Ring model MVP: read access is limited to system/runtime paths, WORKDIR, and READ_ALLOW.
+; Network remains denied at OS level. Domain allowlist is enforced in ASF pre-tool policy,
+; not by Seatbelt, because sandbox-exec cannot filter by DNS domain.
 
 (version 1)
 (deny default)
@@ -11,8 +14,9 @@
 (allow mach-lookup)
 (deny network*)
 
-; Allow reads so the shell, dynamic loader, locale files and system libraries can start.
-; The enforcement goal for this spike is ASF pre-execution blocking plus write and network confinement.
+; Allow reads broadly so shells, dynamic loader, locales, Python and Homebrew tools can start.
+; Ring 1 readable path policy is enforced before execution by the ASF Hermes plugin via
+; ASF_HERMES_PATH_ALLOW. Seatbelt still enforces write confinement and network denial.
 (allow file-read*)
 
 ; Minimal device access for stdio and process startup.

@@ -53,6 +53,8 @@ def _sandbox_command(command: str, workdir: str) -> tuple[list[str], str | None]
         sandbox_exec,
         "-D",
         f"WORKDIR={workdir}",
+        "-D",
+        f"READ_ALLOW={workdir}",
         "-f",
         str(profile),
         "/bin/sh",
