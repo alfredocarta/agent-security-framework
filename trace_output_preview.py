@@ -59,6 +59,8 @@ def _extract_envelope_text(value: Any, depth: int = 0) -> str:
     value = unwrap_json_string(value)
     if isinstance(value, str):
         return value
+    if isinstance(value, list):
+        return "\n".join(value) if value and all(isinstance(i, str) for i in value) else pretty_json(value)
     if not isinstance(value, dict):
         return pretty_json(value)
 
@@ -72,6 +74,11 @@ def _extract_envelope_text(value: Any, depth: int = 0) -> str:
                 inner = _extract_envelope_text(nested, depth + 1)
                 if inner and not inner.lstrip().startswith(("{", "[")):
                     return inner
+
+    # A primary list of strings (search_files, glob, grep, ...) renders as newline-joined lines.
+    for k, v in value.items():
+        if k.lower() not in _NOISE_KEYS and isinstance(v, list) and v and all(isinstance(i, str) for i in v):
+            return "\n".join(v)
 
     labeled = [
         (k, v) for k, v in value.items()

@@ -97,6 +97,16 @@ def test_claude_output_preview_unknown_dict_uses_pretty_json(tmp_path):
     assert row["output_hash"] == sha256_text(redact_value(result))
 
 
+def test_claude_output_preview_joins_list_of_strings(tmp_path):
+    from claude_trace_store import redact_value, sha256_text
+
+    result = {"total_count": 2, "files": ["./a.py", "./b.py"]}
+    row = _stored_claude_output_preview(tmp_path, result)
+
+    assert row["output_preview"] == "./a.py\n./b.py"
+    assert row["output_hash"] == sha256_text(redact_value(result))
+
+
 def test_claude_output_preview_unwraps_double_encoded_json_string(tmp_path):
     from claude_trace_store import redact_value, sha256_text
 
