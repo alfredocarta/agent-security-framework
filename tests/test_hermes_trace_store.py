@@ -62,3 +62,39 @@ def test_get_default_store_uses_asf_sqlite_url(monkeypatch, tmp_path):
     store.ensure_schema()
 
     assert db_path.exists()
+
+
+def test_identical_traces_without_tool_call_id_get_unique_trace_ids(tmp_path):
+    from hermes_trace_store import HermesTraceStore
+
+    store = HermesTraceStore(tmp_path / "asf_test.db")
+    args = {"command": "printf same"}
+
+    first = store.start_trace(
+        agent_id="hermes-live-agent",
+        session_id="session-1",
+        task_id="task-1",
+        tool_call_id=None,
+        hermes_tool_name="terminal",
+        asf_tool_name="shell",
+        args=args,
+        verdict="ALLOW",
+        outcome="ALLOWED",
+        reason="first",
+    )
+    second = store.start_trace(
+        agent_id="hermes-live-agent",
+        session_id="session-1",
+        task_id="task-1",
+        tool_call_id=None,
+        hermes_tool_name="terminal",
+        asf_tool_name="shell",
+        args=args,
+        verdict="ALLOW",
+        outcome="ALLOWED",
+        reason="second",
+    )
+
+    assert first != second
+    rows = store.fetch_traces(session_id="session-1", limit=10)
+    assert {row["trace_id"] for row in rows} == {first, second}

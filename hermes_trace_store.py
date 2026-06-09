@@ -163,8 +163,8 @@ class HermesTraceStore:
     ) -> str:
         self.ensure_schema()
         now = _utc_now()
-        trace_id = trace_id or _make_trace_id(session_id, task_id, tool_call_id, hermes_tool_name, args)
         row_id = uuid.uuid4().hex
+        trace_id = trace_id or _make_trace_id(session_id, task_id, tool_call_id, hermes_tool_name, args, row_id)
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
@@ -304,7 +304,14 @@ class HermesTraceStore:
         return "", []
 
 
-def _make_trace_id(session_id: str | None, task_id: str | None, tool_call_id: str | None, tool_name: str, args: Any) -> str:
+def _make_trace_id(
+    session_id: str | None,
+    task_id: str | None,
+    tool_call_id: str | None,
+    tool_name: str,
+    args: Any,
+    row_id: str,
+) -> str:
     seed = stable_json(
         {
             "session_id": session_id,
@@ -312,6 +319,7 @@ def _make_trace_id(session_id: str | None, task_id: str | None, tool_call_id: st
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
             "args_hash": sha256_text(args),
+            "row_id": row_id,
         }
     )
     return f"hermes-{hashlib.sha256(seed.encode()).hexdigest()[:16]}"

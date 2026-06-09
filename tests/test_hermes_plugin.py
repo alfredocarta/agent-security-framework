@@ -239,6 +239,42 @@ def test_live_dispatch_captures_output_without_post_hook(monkeypatch, tmp_path):
     assert row["tool_duration_ms"] >= 0
 
 
+
+def test_identical_sequential_live_calls_get_distinct_trace_ids_and_outputs(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._DISPATCH_WRAPPED = False
+
+    db_path = tmp_path / "trace.db"
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.delenv("ASF_HERMES_SANDBOX", raising=False)
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "test allow"))
+
+    outputs = iter([{"stdout": "first-output"}, {"stdout": "second-output"}])
+
+    def fake_dispatch(name, args=None, **kwargs):
+        return next(outputs)
+
+    reg = _install_fake_tool_registry(monkeypatch, fake_dispatch)
+
+    args = {"command": "printf same"}
+    plugin.on_pre_tool_call(tool_name="terminal", args=args, task_id="task-same", session_id="sess-same")
+    reg.dispatch("terminal", args, task_id="task-same", session_id="sess-same")
+    plugin.on_pre_tool_call(tool_name="terminal", args=args, task_id="task-same", session_id="sess-same")
+    reg.dispatch("terminal", args, task_id="task-same", session_id="sess-same")
+
+    from hermes_trace_store import HermesTraceStore
+    rows = sorted(
+        HermesTraceStore(db_path).fetch_traces(session_id="sess-same", limit=10),
+        key=lambda row: row["timestamp"],
+    )
+    assert len(rows) == 2
+    assert rows[0]["trace_id"] != rows[1]["trace_id"]
+    assert "first-output" in rows[0]["output_preview"]
+    assert "second-output" in rows[1]["output_preview"]
+    assert rows[0]["output_hash"] != rows[1]["output_hash"]
+
 def test_live_dispatch_captures_output_with_sandbox(monkeypatch, tmp_path):
     plugin = load_plugin_module()
     plugin._DISPATCH_WRAPPED = False
