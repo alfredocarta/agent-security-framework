@@ -244,9 +244,14 @@ class HermesTraceStore:
             assignments.append("reason = COALESCE(reason, '') || ?")
             values.append(f" | output_guard: {output_reason}")
         values.extend(params)
+        # Idempotency guard: only write output into rows that have not been finished yet.
+        # The live runtime captures output via the dispatch wrapper; if post_tool_call also
+        # fires (in environments where it does) it must not overwrite the same row. output_hash
+        # is NULL after start_trace and non-NULL once output has been persisted.
         with self._lock, self._connect() as conn:
             cur = conn.execute(
-                f"UPDATE hermes_tool_traces SET {', '.join(assignments)} WHERE {where}",
+                f"UPDATE hermes_tool_traces SET {', '.join(assignments)} "
+                f"WHERE ({where}) AND output_hash IS NULL",
                 values,
             )
             conn.commit()

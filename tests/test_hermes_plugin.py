@@ -152,6 +152,144 @@ def test_post_hook_correlates_output_without_tool_call_id(monkeypatch, tmp_path)
     assert two["output_preview"] is None
 
 
+def _install_fake_tool_registry(monkeypatch, dispatch_fn):
+    """Inject a fake `tools.registry` module so the plugin's lazy
+    `from tools.registry import registry` resolves to a stand-in whose `dispatch`
+    we control, reproducing the Hermes live runtime that executes tools via dispatch."""
+    import sys
+    import types
+
+    tools_mod = types.ModuleType("tools")
+    registry_mod = types.ModuleType("tools.registry")
+
+    class _Reg:
+        pass
+
+    reg = _Reg()
+    reg.dispatch = dispatch_fn
+    registry_mod.registry = reg
+    tools_mod.registry = registry_mod
+    monkeypatch.setitem(sys.modules, "tools", tools_mod)
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
+    return reg
+
+
+def test_live_dispatch_captures_output_without_post_hook(monkeypatch, tmp_path):
+    # Reproduces the Hermes agentic runtime: only pre_tool_call fires, the tool runs through
+    # tools.registry.dispatch, and post_tool_call is never invoked. Output and tool_duration_ms
+    # must still land on the same row the pre-hook opened (correlated by task_id, no tool_call_id).
+    plugin = load_plugin_module()
+    plugin._DISPATCH_WRAPPED = False
+
+    db_path = tmp_path / "trace.db"
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.delenv("ASF_HERMES_SANDBOX", raising=False)
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "test allow"))
+
+    def fake_dispatch(name, args=None, **kwargs):
+        time.sleep(0.005)
+        return {"stdout": "live-output-123"}
+
+    reg = _install_fake_tool_registry(monkeypatch, fake_dispatch)
+
+    args = {"command": "printf live"}
+    # Pre-hook opens the row and installs the dispatch wrapper (no tool_call_id in the live path).
+    plugin.on_pre_tool_call(tool_name="terminal", args=args, task_id="task-live", session_id="sess-live")
+    assert reg.dispatch is not fake_dispatch
+
+    # Runtime executes the tool: task_id arrives in kwargs, tool_call_id does not.
+    result = reg.dispatch("terminal", args, task_id="task-live", session_id="sess-live")
+    assert result == {"stdout": "live-output-123"}
+
+    from hermes_trace_store import HermesTraceStore
+    rows = HermesTraceStore(db_path).fetch_traces(session_id="sess-live")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["task_id"] == "task-live"
+    assert row["tool_call_id"] is None
+    assert "live-output-123" in row["output_preview"]
+    assert row["output_hash"]
+    assert row["tool_duration_ms"] is not None
+    assert row["tool_duration_ms"] >= 0
+
+
+def test_live_dispatch_captures_output_with_sandbox(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._DISPATCH_WRAPPED = False
+
+    db_path = tmp_path / "trace.db"
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "ok"))
+    # Stub the sandbox executor so the test is independent of sandbox-exec / a real shell.
+    monkeypatch.setattr(plugin, "_sandbox_terminal", lambda a: '{"output": "sandboxed-out", "exit_code": 0}')
+
+    calls = {"original": 0}
+
+    def fake_dispatch(name, args=None, **kwargs):
+        calls["original"] += 1
+        return "should-not-run"
+
+    reg = _install_fake_tool_registry(monkeypatch, fake_dispatch)
+
+    args = {"command": "echo hi"}
+    plugin.on_pre_tool_call(tool_name="terminal", args=args, task_id="task-sbx", session_id="sess-sbx")
+    out = reg.dispatch("terminal", args, task_id="task-sbx", session_id="sess-sbx")
+
+    # Sandbox path runs instead of the original dispatch, and its output is still captured.
+    assert "sandboxed-out" in out
+    assert calls["original"] == 0
+
+    from hermes_trace_store import HermesTraceStore
+    row = HermesTraceStore(db_path).fetch_traces(session_id="sess-sbx")[0]
+    assert "sandboxed-out" in row["output_preview"]
+    assert row["tool_duration_ms"] is not None
+
+
+def test_dispatch_and_post_hook_do_not_double_write(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._DISPATCH_WRAPPED = False
+
+    db_path = tmp_path / "trace.db"
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    monkeypatch.delenv("ASF_HERMES_SANDBOX", raising=False)
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "ok"))
+
+    def fake_dispatch(name, args=None, **kwargs):
+        return {"stdout": "first-output"}
+
+    reg = _install_fake_tool_registry(monkeypatch, fake_dispatch)
+
+    args = {"command": "printf once"}
+    plugin.on_pre_tool_call(tool_name="terminal", args=args, task_id="task-dup", session_id="sess-dup")
+    reg.dispatch("terminal", args, task_id="task-dup", session_id="sess-dup")
+
+    # post_tool_call also fires (environments where it does): it must not overwrite the row
+    # already finished by the dispatch wrapper.
+    plugin.on_post_tool_call(
+        tool_name="terminal",
+        args=args,
+        result={"stdout": "second-output"},
+        task_id="task-dup",
+        session_id="sess-dup",
+        duration_ms=999,
+    )
+
+    from hermes_trace_store import HermesTraceStore
+    rows = HermesTraceStore(db_path).fetch_traces(session_id="sess-dup")
+    assert len(rows) == 1
+    row = rows[0]
+    assert "first-output" in row["output_preview"]
+    assert "second-output" not in row["output_preview"]
+    assert row["tool_duration_ms"] != 999
+
+
 def test_pre_hook_enforce_blocks_deny(monkeypatch, tmp_path):
     plugin = load_plugin_module()
 

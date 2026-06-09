@@ -54,7 +54,7 @@ from wrapper import asf_core
 _AGENT_REGISTERED = False
 _TRACE_BY_CALL_KEY: dict[tuple[str, str, str], str] = {}
 _TRACE_LOCK = threading.Lock()
-_SANDBOX_DISPATCH_INSTALLED = False
+_DISPATCH_WRAPPED = False
 _ORIGINAL_DISPATCH = None
 
 TOOL_MAP = {
@@ -339,9 +339,45 @@ def _sandbox_execute_code(args: dict[str, Any]) -> str:
     return asf_core.sandbox_execute_code(args, asf_root=DEFAULT_ASF_ROOT)
 
 
-def install_sandbox_dispatch() -> None:
-    global _SANDBOX_DISPATCH_INSTALLED, _ORIGINAL_DISPATCH
-    if _SANDBOX_DISPATCH_INSTALLED or not _sandbox_enabled():
+def _persist_dispatch_output(
+    *,
+    tool_name: str,
+    args: dict[str, Any],
+    result: Any,
+    task_id: str,
+    session_id: str,
+    tool_call_id: str,
+    duration_ms: int | None,
+) -> None:
+    # Correlates the tool output with the row opened by on_pre_tool_call (same
+    # call_key(task_id, tool_name, args)) and persists output_preview + tool_duration_ms.
+    # finish_call_trace / the store are idempotent, so a duplicate from on_post_tool_call
+    # (in environments where it fires) does not overwrite this row.
+    output_risky, output_reason = _detect_output_risk(result)
+    output_verdict = "DENY" if output_risky else None
+    asf_core.finish_call_trace(
+        tool_call_id=tool_call_id or None,
+        session_id=session_id or None,
+        task_id=task_id or None,
+        source_tool_name=tool_name,
+        args=args,
+        result=result,
+        duration_ms=duration_ms,
+        side_effect_verified=False,
+        side_effect_occurred=None,
+        output_verdict=output_verdict,
+        output_reason=output_reason if output_risky else None,
+    )
+
+
+def install_dispatch_wrapper() -> None:
+    # The Hermes agentic runtime executes tools through tools.registry.dispatch and only ever
+    # invokes the pre_tool_call hook (post_tool_call/transform_tool_result live on an unused
+    # path), so output and tool_duration_ms can only be captured here. We wrap dispatch once,
+    # whenever the plugin is enabled (not just when the sandbox is on), run the tool (sandboxed
+    # when ASF_HERMES_SANDBOX is set, otherwise the original), then persist its output.
+    global _DISPATCH_WRAPPED, _ORIGINAL_DISPATCH
+    if _DISPATCH_WRAPPED or not _enabled():
         return
     try:
         from tools.registry import registry as tool_registry
@@ -350,16 +386,40 @@ def install_sandbox_dispatch() -> None:
 
     original = tool_registry.dispatch
 
-    def sandbox_dispatch(name: str, args: dict, **kwargs: Any) -> str:
-        if name == "terminal":
-            return _sandbox_terminal(args or {})
-        if name == "execute_code":
-            return _sandbox_execute_code(args or {})
-        return original(name, args, **kwargs)
+    def asf_dispatch(name: str, args: dict | None = None, **kwargs: Any) -> Any:
+        call_args = args if isinstance(args, dict) else {}
+        task_id = str(kwargs.get("task_id", "") or "")
+        session_id = str(kwargs.get("session_id", "") or "")
+        tool_call_id = str(kwargs.get("tool_call_id", "") or "")
+        sandboxed = _sandbox_enabled()
+        start = time.monotonic()
+        result: Any = None
+        try:
+            if sandboxed and name == "terminal":
+                result = _sandbox_terminal(call_args)
+            elif sandboxed and name == "execute_code":
+                result = _sandbox_execute_code(call_args)
+            else:
+                result = original(name, args, **kwargs)
+            return result
+        finally:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            try:
+                _persist_dispatch_output(
+                    tool_name=name,
+                    args=call_args,
+                    result=result,
+                    task_id=task_id,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                    duration_ms=duration_ms,
+                )
+            except Exception:
+                pass
 
-    tool_registry.dispatch = sandbox_dispatch
+    tool_registry.dispatch = asf_dispatch
     _ORIGINAL_DISPATCH = original
-    _SANDBOX_DISPATCH_INSTALLED = True
+    _DISPATCH_WRAPPED = True
 
 
 def on_pre_tool_call(
@@ -373,7 +433,7 @@ def on_pre_tool_call(
 ) -> dict[str, str] | None:
     if not _enabled() or not tool_name:
         return None
-    install_sandbox_dispatch()
+    install_dispatch_wrapper()
 
     args = args if isinstance(args, dict) else {}
     if _mode() == "enforce":
@@ -462,27 +522,24 @@ def on_post_tool_call(
                 duration_ms = int(value)
                 break
 
-    output_risky, output_reason = _detect_output_risk(result)
-    output_verdict = "DENY" if output_risky else None
+    # Harmless fallback: the live runtime captures output via the dispatch wrapper, but if
+    # post_tool_call does fire we still persist here. The store is idempotent, so this never
+    # double-writes a row already finished by the dispatch wrapper.
     try:
-        asf_core.finish_call_trace(
-            tool_call_id=tool_call_id or None,
-            session_id=session_id or None,
-            task_id=task_id or None,
-            source_tool_name=tool_name,
-            args=args,
+        _persist_dispatch_output(
+            tool_name=tool_name,
+            args=args if isinstance(args, dict) else {},
             result=result,
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
             duration_ms=duration_ms,
-            side_effect_verified=False,
-            side_effect_occurred=None,
-            output_verdict=output_verdict,
-            output_reason=output_reason if output_risky else None,
         )
     except Exception:
         return
 
 
 def register(ctx) -> None:
-    install_sandbox_dispatch()
+    install_dispatch_wrapper()
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
