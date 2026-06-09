@@ -364,96 +364,6 @@ def _block_directive(verdict: str, reason: str) -> dict[str, str]:
     return asf_core.block_directive(verdict, reason)
 
 
-def _allow_directive_reason(kind: str, value: str) -> str:
-    return asf_core.allow_directive_reason(kind, value)
-
-
-def _record_allowlist_block(
-    tool_name: str,
-    args: dict[str, Any],
-    reason: str,
-    *,
-    task_id: str = "",
-    session_id: str = "",
-    tool_call_id: str = "",
-) -> dict[str, str]:
-    # Allowlist/policy-gate blocks short-circuit before the asf_decision pipeline, so without this
-    # the deny would only land in the audit chain (no input/model). Log the BLOCKED audit event,
-    # then persist a Hermes trace row carrying the tool input (args) and the agent model, correlated
-    # to the audit event via its hash, so the dashboard shows input + model for these denies.
-    audit_hash = None
-    try:
-        from audit import AUDITOR
-
-        audit_hash = AUDITOR.log_event(_agent_id(), normalize_tool_name(tool_name), "BLOCKED", reason)
-    except Exception:
-        audit_hash = None
-    try:
-        asf_core.start_call_trace(
-            agent_id=_agent_id(),
-            session_id=session_id or None,
-            task_id=task_id or None,
-            tool_call_id=tool_call_id or None,
-            source_tool_name=tool_name,
-            asf_tool_name=normalize_tool_name(tool_name),
-            args=args,
-            agent_model=_agent_model(),
-            verdict="DENY",
-            outcome=_outcome_from_verdict("DENY"),
-            reason=reason,
-            latency_ms=0,
-            audit_hash=audit_hash,
-        )
-    except Exception:
-        if _env_bool("ASF_HERMES_FAIL_CLOSED", False):
-            return {"action": "block", "message": "[ASF BLOCKED] failed to persist Hermes trace"}
-    return _block_directive("DENY", reason)
-
-
-def _command_from_shell(command: str) -> str:
-    return asf_core.command_from_shell(command)
-
-
-def _is_command_allowed(command: str) -> bool:
-    return asf_core.is_command_allowed(command)
-
-
-def _path_allowed(path_value: str | None, *, write: bool = False) -> bool:
-    return asf_core.path_allowed(path_value, write=write)
-
-
-def _hosts_in_text(text: str) -> set[str]:
-    return asf_core.hosts_in_text(text)
-
-
-def _host_allowed(host: str, allowed: list[str]) -> bool:
-    return asf_core.host_allowed(host, allowed)
-
-
-def _network_allowed_for_text(text: str) -> tuple[bool, str | None]:
-    return asf_core.network_allowed_for_text(text)
-
-
-def _allowlist_block(tool_name: str, args: dict[str, Any]) -> str | None:
-    # Returns the policy reason when the call must be blocked, else None. The caller records the
-    # trace and builds the block directive (see _record_allowlist_block).
-    if tool_name == "terminal":
-        command = str(args.get("command", ""))
-        if not _is_command_allowed(command):
-            return _allow_directive_reason("command", _command_from_shell(command))
-        ok, host = _network_allowed_for_text(command)
-        if not ok and host:
-            return _allow_directive_reason("network destination", host)
-    elif tool_name == "execute_code":
-        ok, host = _network_allowed_for_text(str(args.get("code", "")))
-        if not ok and host:
-            return _allow_directive_reason("network destination", host)
-
-    if tool_name in {"read_file", "write_file", "patch", "search_files"}:
-        path = args.get("path")
-        if isinstance(path, str) and not _path_allowed(path, write=tool_name in {"write_file", "patch"}):
-            return _allow_directive_reason("path", path)
-    return None
 
 
 def _find_hitl_decision(event_hash: str) -> tuple[str, str] | None:
@@ -593,17 +503,6 @@ def on_pre_tool_call(
     install_dispatch_wrapper()
 
     args = args if isinstance(args, dict) else {}
-    if _mode() == "enforce":
-        allowlist_reason = _allowlist_block(tool_name, args)
-        if allowlist_reason is not None:
-            return _record_allowlist_block(
-                tool_name,
-                args,
-                allowlist_reason,
-                task_id=task_id,
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-            )
 
     asf_tool_name = normalize_tool_name(tool_name)
     security_text = build_security_text(tool_name, args)

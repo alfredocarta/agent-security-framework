@@ -50,7 +50,6 @@ class AuditTrail:
     def log_event(self, agent_id, action, outcome, reason,
                   *, trace_id=None, latency_ms=None, confidence=None,
                   metadata=None, session_id=None):
-        new_hash = None
         with _audit_lock:
             db = SessionLocal()
             try:
@@ -112,8 +111,6 @@ class AuditTrail:
                 )
         except Exception:
             pass
-
-        return new_hash
 
 
 AUDITOR = AuditTrail()
