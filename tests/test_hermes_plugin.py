@@ -26,6 +26,30 @@ def load_plugin_module():
     return module
 
 
+
+
+def test_agent_model_uses_runtime_env_before_static_config(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model:\n  default: gpt-5.5\n  provider: openai-codex\n")
+
+    monkeypatch.delenv("ASF_HERMES_AGENT_MODEL", raising=False)
+    monkeypatch.setenv("HERMES_CONFIG", str(cfg))
+    monkeypatch.setenv("HERMES_MODEL", "qwen 3.5")
+    monkeypatch.setenv("HERMES_TUI_PROVIDER", "openrouter")
+
+    assert plugin._agent_model() == "qwen 3.5 via openrouter"
+
+
+def test_agent_model_explicit_asf_override_wins(monkeypatch):
+    plugin = load_plugin_module()
+    monkeypatch.setenv("ASF_HERMES_AGENT_MODEL", "override-model")
+    monkeypatch.setenv("HERMES_MODEL", "qwen 3.5")
+    monkeypatch.setenv("HERMES_TUI_PROVIDER", "openrouter")
+
+    assert plugin._agent_model() == "override-model"
+
+
 def test_repo_and_deployed_plugin_in_sync():
     if not DEPLOYED_PLUGIN_PATH.exists():
         pytest.skip(f"No deployed plugin at {DEPLOYED_PLUGIN_PATH} to compare against")

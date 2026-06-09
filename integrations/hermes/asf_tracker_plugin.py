@@ -108,23 +108,40 @@ def _agent_id() -> str:
     return os.environ.get("ASF_HERMES_AGENT_ID", "hermes-live-agent")
 
 
+def _runtime_model_from_env() -> tuple[str | None, str | None]:
+    # Hermes sets these for the live TUI/gateway process and updates them on
+    # runtime model switches. They reflect the active session model, unlike
+    # ~/.hermes/config.yaml which is only the static default.
+    model = (
+        os.environ.get("HERMES_MODEL")
+        or os.environ.get("HERMES_INFERENCE_MODEL")
+        or os.environ.get("HERMES_TUI_MODEL")
+    )
+    provider = (
+        os.environ.get("HERMES_TUI_PROVIDER")
+        or os.environ.get("HERMES_INFERENCE_PROVIDER")
+        or os.environ.get("HERMES_PROVIDER")
+    )
+    model = model.strip() if isinstance(model, str) else None
+    provider = provider.strip() if isinstance(provider, str) else None
+    return model or None, provider or None
+
+
+def _format_agent_model(model: str | None, provider: str | None = None) -> str | None:
+    if not model:
+        return None
+    if provider and f" via {provider}" not in model:
+        return f"{model} via {provider}"
+    return model
+
+
 def _agent_model() -> str | None:
     explicit = os.environ.get("ASF_HERMES_AGENT_MODEL")
     if explicit:
-        return explicit
-    try:
-        import yaml
+        return explicit.strip() or None
 
-        config_path = Path(os.environ.get("HERMES_CONFIG", str(Path.home() / ".hermes" / "config.yaml")))
-        config = yaml.safe_load(config_path.read_text()) or {}
-        model_cfg = config.get("model", {}) if isinstance(config, dict) else {}
-        model = model_cfg.get("default") or model_cfg.get("model")
-        provider = model_cfg.get("provider")
-        if model and provider:
-            return f"{model} via {provider}"
-        return model
-    except Exception:
-        return None
+    model, provider = _runtime_model_from_env()
+    return _format_agent_model(model, provider)
 
 
 def normalize_tool_name(tool_name: str) -> str:
