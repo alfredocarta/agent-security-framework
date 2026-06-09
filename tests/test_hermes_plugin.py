@@ -206,10 +206,10 @@ def test_post_hook_persists_redacted_output_preview(monkeypatch, tmp_path):
     from hermes_trace_store import HermesTraceStore
     rows = HermesTraceStore(db_path).fetch_traces(session_id="session-1")
     assert len(rows) == 1
-    assert rows[0]["output_preview"]
+    assert rows[0]["output_preview"] == "ok"
     assert rows[0]["output_hash"]
     assert rows[0]["tool_duration_ms"] == 12
-    assert "[REDACTED_SECRET]" in rows[0]["output_preview"]
+    assert "stdout" not in rows[0]["output_preview"]
     assert "abcdef1234567890" not in rows[0]["output_preview"]
     assert "supersecretvalue" not in rows[0]["args_preview"]
 
