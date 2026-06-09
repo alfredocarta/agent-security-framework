@@ -56,6 +56,7 @@ _TRACE_BY_CALL_KEY: dict[tuple[str, str, str], str] = {}
 _TRACE_LOCK = threading.Lock()
 _DISPATCH_WRAPPED = False
 _ORIGINAL_DISPATCH = None
+_PLUGIN_CONTEXT = None
 
 TOOL_MAP = {
     "terminal": "shell",
@@ -108,10 +109,18 @@ def _agent_id() -> str:
     return os.environ.get("ASF_HERMES_AGENT_ID", "hermes-live-agent")
 
 
+def _clean_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return None
+
+
 def _runtime_model_from_env() -> tuple[str | None, str | None]:
-    # Hermes sets these for the live TUI/gateway process and updates them on
-    # runtime model switches. They reflect the active session model, unlike
-    # ~/.hermes/config.yaml which is only the static default.
+    # Hermes sets these for explicit TUI/CLI launches and TUI runtime model
+    # switches. They are process-local and fresher than ~/.hermes/config.yaml,
+    # but not present for the normal wrapper path when the model only comes
+    # from config.yaml.
     model = (
         os.environ.get("HERMES_MODEL")
         or os.environ.get("HERMES_INFERENCE_MODEL")
@@ -122,9 +131,98 @@ def _runtime_model_from_env() -> tuple[str | None, str | None]:
         or os.environ.get("HERMES_INFERENCE_PROVIDER")
         or os.environ.get("HERMES_PROVIDER")
     )
-    model = model.strip() if isinstance(model, str) else None
-    provider = provider.strip() if isinstance(provider, str) else None
-    return model or None, provider or None
+    return _clean_str(model), _clean_str(provider)
+
+
+def _runtime_model_from_plugin_context() -> tuple[str | None, str | None]:
+    # Authoritative live CLI source: PluginContext -> PluginManager._cli_ref ->
+    # active AIAgent. The status bar uses the same agent.model because it changes
+    # after fallback and /model switches, while cli.model is only the startup
+    # value. register(ctx) runs before ChatCLI stores _cli_ref, so resolve this
+    # lazily at tool-call time from the retained context.
+    ctx = _PLUGIN_CONTEXT
+    manager = getattr(ctx, "_manager", None) if ctx is not None else None
+    cli = getattr(manager, "_cli_ref", None) if manager is not None else None
+    agent = getattr(cli, "agent", None) if cli is not None else None
+
+    model = _clean_str(getattr(agent, "model", None)) if agent is not None else None
+    provider = _clean_str(getattr(agent, "provider", None)) if agent is not None else None
+    if model:
+        return model, provider
+
+    # Early startup fallback before cli.agent is attached. This is runtime state
+    # (constructor-resolved config/CLI arg), but it will be superseded by
+    # agent.model as soon as the agent exists.
+    if cli is not None:
+        model = _clean_str(getattr(cli, "model", None))
+        provider = (
+            _clean_str(getattr(cli, "provider", None))
+            or _clean_str(getattr(cli, "requested_provider", None))
+        )
+        if model:
+            return model, provider
+
+    return None, None
+
+
+def _hermes_config_path() -> Path:
+    explicit = _clean_str(os.environ.get("HERMES_CONFIG"))
+    if explicit:
+        return Path(explicit).expanduser()
+    home = _clean_str(os.environ.get("HERMES_HOME"))
+    return (Path(home).expanduser() if home else Path.home() / ".hermes") / "config.yaml"
+
+
+def _config_model_fallback() -> tuple[str | None, str | None]:
+    path = _hermes_config_path()
+    if not path.exists():
+        return None, None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return None, None
+
+    data: Any = None
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(text)
+    except Exception:
+        data = None
+
+    if isinstance(data, dict):
+        model_cfg = data.get("model")
+        if isinstance(model_cfg, dict):
+            return _clean_str(model_cfg.get("default") or model_cfg.get("model")), _clean_str(model_cfg.get("provider"))
+        return _clean_str(model_cfg), None
+
+    # Tiny fallback parser for tests/minimal installs where PyYAML is not
+    # available. It intentionally handles only the model block we need.
+    in_model = False
+    model: str | None = None
+    provider: str | None = None
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        stripped = raw.strip()
+        if indent == 0:
+            if stripped.startswith("model:"):
+                in_model = True
+                rest = stripped.split(":", 1)[1].strip()
+                if rest:
+                    model = rest.strip('"\'')
+            else:
+                in_model = False
+            continue
+        if in_model and indent > 0 and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            value = value.strip().strip('"\'')
+            if key.strip() in {"default", "model"} and value and model is None:
+                model = value
+            elif key.strip() == "provider" and value:
+                provider = value
+    return _clean_str(model), _clean_str(provider)
 
 
 def _format_agent_model(model: str | None, provider: str | None = None) -> str | None:
@@ -140,8 +238,16 @@ def _agent_model() -> str | None:
     if explicit:
         return explicit.strip() or None
 
-    model, provider = _runtime_model_from_env()
-    return _format_agent_model(model, provider)
+    for resolver in (
+        _runtime_model_from_plugin_context,
+        _runtime_model_from_env,
+        _config_model_fallback,
+    ):
+        model, provider = resolver()
+        formatted = _format_agent_model(model, provider)
+        if formatted:
+            return formatted
+    return None
 
 
 def normalize_tool_name(tool_name: str) -> str:
@@ -557,6 +663,8 @@ def on_post_tool_call(
 
 
 def register(ctx) -> None:
+    global _PLUGIN_CONTEXT
+    _PLUGIN_CONTEXT = ctx
     install_dispatch_wrapper()
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)

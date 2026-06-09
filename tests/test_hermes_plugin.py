@@ -50,6 +50,76 @@ def test_agent_model_explicit_asf_override_wins(monkeypatch):
     assert plugin._agent_model() == "override-model"
 
 
+
+def test_agent_model_resolution_order_override_runtime_config(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model:\n  default: stale-config-model\n  provider: stale-provider\n")
+
+    class Agent:
+        model = "runtime-qwen-3.5"
+        provider = "qwen-oauth"
+
+    class Cli:
+        agent = Agent()
+        model = "cli-startup-model"
+        requested_provider = "cli-provider"
+
+    class Manager:
+        _cli_ref = Cli()
+
+    class Ctx:
+        _manager = Manager()
+
+    monkeypatch.setattr(plugin, "_PLUGIN_CONTEXT", Ctx())
+    monkeypatch.setenv("HERMES_CONFIG", str(cfg))
+    monkeypatch.setenv("HERMES_MODEL", "env-model")
+    monkeypatch.setenv("HERMES_TUI_PROVIDER", "env-provider")
+    monkeypatch.delenv("ASF_HERMES_AGENT_MODEL", raising=False)
+
+    assert plugin._agent_model() == "runtime-qwen-3.5 via qwen-oauth"
+
+    monkeypatch.setenv("ASF_HERMES_AGENT_MODEL", "explicit-override")
+    assert plugin._agent_model() == "explicit-override"
+
+    monkeypatch.delenv("ASF_HERMES_AGENT_MODEL", raising=False)
+    monkeypatch.setattr(plugin, "_PLUGIN_CONTEXT", None)
+    assert plugin._agent_model() == "env-model via env-provider"
+
+    monkeypatch.delenv("HERMES_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
+    assert plugin._agent_model() == "stale-config-model via stale-provider"
+
+
+def test_pre_hook_records_config_fallback_agent_model(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model:\n  default: config-default-model\n  provider: openrouter\n")
+    db_path = tmp_path / "trace.db"
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("HERMES_CONFIG", str(cfg))
+    monkeypatch.delenv("ASF_HERMES_AGENT_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_TUI_MODEL", raising=False)
+    monkeypatch.setattr(plugin, "_PLUGIN_CONTEXT", None)
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "ok"))
+
+    plugin.on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": "pwd"},
+        task_id="task-model",
+        session_id="session-model",
+        tool_call_id="call-model",
+    )
+
+    from hermes_trace_store import HermesTraceStore
+
+    row = HermesTraceStore(db_path).fetch_traces(session_id="session-model")[0]
+    assert row["agent_model"] == "config-default-model via openrouter"
+
 def test_repo_and_deployed_plugin_in_sync():
     if not DEPLOYED_PLUGIN_PATH.exists():
         pytest.skip(f"No deployed plugin at {DEPLOYED_PLUGIN_PATH} to compare against")
