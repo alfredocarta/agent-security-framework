@@ -581,6 +581,40 @@ def test_allowlist_blocks_command_path_and_network(monkeypatch, tmp_path):
     assert plugin.on_pre_tool_call(tool_name="read_file", args={"path": str(allowed_read / "ok.txt")}) is None
 
 
+def test_allowlist_block_records_trace_with_input_and_model(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+
+    db_path = tmp_path / "trace.db"
+    allowed_read = tmp_path / "allowed"
+    allowed_read.mkdir()
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_HERMES_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_PATH_ALLOW", str(allowed_read))
+    monkeypatch.setenv("ASF_HERMES_AGENT_MODEL", "test-model via test-provider")
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "unused"))
+
+    blocked_path = str(tmp_path / "secret.txt")
+    result = plugin.on_pre_tool_call(
+        tool_name="read_file",
+        args={"path": blocked_path},
+        task_id="task-deny",
+        session_id="session-deny",
+        tool_call_id="call-deny",
+    )
+    assert result is not None and result["action"] == "block"
+    assert "path" in result["message"]
+
+    from hermes_trace_store import HermesTraceStore
+
+    rows = HermesTraceStore(db_path).fetch_traces(session_id="session-deny")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["verdict"] == "DENY"
+    assert row["agent_model"] == "test-model via test-provider"
+    assert blocked_path in (row["args_preview"] or "")
+    assert row["output_preview"] is None
+
+
 def test_allowlist_blocks_unapproved_network_destination(monkeypatch, tmp_path):
     plugin = load_plugin_module()
 
