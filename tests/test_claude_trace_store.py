@@ -30,6 +30,23 @@ def test_claude_output_preview_extracts_read_file_content(tmp_path):
     assert row["output_hash"] == sha256_text(redact_value(result))
 
 
+def test_claude_output_preview_summarizes_edit_envelope(tmp_path):
+    from claude_trace_store import redact_value, sha256_text
+
+    result = {
+        "filePath": "/tmp/a.py",
+        "oldString": "x = 1",
+        "newString": "x = 2",
+        "originalFile": "x = 1\n# very long original file body that must not appear",
+    }
+    row = _stored_claude_output_preview(tmp_path, result)
+
+    assert row["output_preview"] == "/tmp/a.py\n\nold:\nx = 1\n\nnew:\nx = 2"
+    assert "originalFile" not in row["output_preview"]
+    assert "very long original file body" not in row["output_preview"]
+    assert row["output_hash"] == sha256_text(redact_value(result))
+
+
 def test_claude_output_preview_extracts_top_level_content(tmp_path):
     from claude_trace_store import redact_value, sha256_text
 

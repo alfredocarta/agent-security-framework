@@ -63,6 +63,13 @@ def output_preview_text(value: Any, max_bytes: int) -> str:
             text = unwrapped["content"]
         elif isinstance(file_value, dict) and isinstance(file_value.get("content"), str):
             text = file_value["content"]
+        elif isinstance(unwrapped.get("oldString"), str) and isinstance(unwrapped.get("newString"), str):
+            # Edit tool envelope: show a readable old/new summary, drop the full originalFile.
+            file_path = unwrapped.get("filePath")
+            parts = [str(file_path)] if isinstance(file_path, str) else []
+            parts.append(f"old:\n{unwrapped['oldString']}")
+            parts.append(f"new:\n{unwrapped['newString']}")
+            text = "\n\n".join(parts)
         else:
             text = pretty_json(unwrapped)
     elif isinstance(unwrapped, str):
