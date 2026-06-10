@@ -1,0 +1,66 @@
+# Phase 3: Hermes Container Image (host-enforced boundary)
+#
+# Minimal image that carries the ASF framework so the Hermes runtime + plugin can
+# run INSIDE a Linux container while the host enforces the security boundary
+# (filesystem, network, capabilities). The container image itself grants no
+# privileges; confinement is applied at `docker run` time by wrapper/asf_container_launch.py.
+#
+# This image is also used as the ASF egress-proxy sidecar (it carries
+# wrapper/asf_egress_proxy.py on PYTHONPATH), so the same vetted proxy code runs
+# as the only egress path for the confined Hermes container.
+#
+# Build (normally done by the launcher / smoke test, not by hand):
+#   docker build -t asf-hermes:phase3 -f Dockerfile.phase3 .
+#
+# SECURITY NOTES (enforced at runtime, NOT in this file):
+#   - read-only root fs, tmpfs /tmp, non-root user, dropped caps, no-new-privileges
+#   - workspace is the ONLY bind mount; no home, no creds, no docker socket
+#   - egress is forced through the ASF egress proxy on an internal Docker network
+
+FROM python:3.11-slim
+
+# Minimal runtime tooling. curl is used by the smoke test to exercise the egress path.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user. The container is additionally pinned to this uid:gid at runtime.
+RUN groupadd --gid 1000 asf && \
+    useradd --uid 1000 --gid asf --shell /bin/bash --create-home asf
+
+# Curated, lightweight dependency set. This is enough for the ASF egress proxy
+# (stdlib only) and the lighter ASF modules. A full Hermes runtime image would add
+# the interceptor ML deps (numpy/scikit-learn/onnxruntime) or mount a prebuilt venv;
+# that is intentionally out of scope for this minimal boundary prototype.
+RUN pip install --no-cache-dir \
+    PyYAML \
+    cryptography \
+    sqlalchemy \
+    requests
+
+# Carry the ASF framework. The Hermes runtime is supplied separately at run time
+# (bind-mounted read-only at ASF_HERMES_AGENT_ROOT, or pip-installed in a fuller image).
+COPY wrapper/ /opt/asf/wrapper/
+COPY integrations/ /opt/asf/integrations/
+COPY registry.py audit.py /opt/asf/
+COPY requirements.txt /opt/asf/requirements.txt
+
+# /workspace is the mount point for the single bind-mounted project directory.
+RUN mkdir -p /workspace && chown asf:asf /workspace
+WORKDIR /workspace
+
+ENV PYTHONPATH=/opt/asf \
+    ASF_HERMES_AGENT_ROOT=/opt/hermes \
+    ASF_CONTAINER_MODE=true \
+    PYTHONUNBUFFERED=1
+
+USER asf
+
+# Default command is an informative self-check. The launcher overrides this with the
+# actual Hermes invocation (e.g. `hermes chat`) once a Hermes runtime is present.
+CMD ["python", "-c", "import wrapper.asf_egress_proxy as p; print('ASF Phase3 container OK; egress proxy module loaded:', p.__file__)"]
+
+LABEL org.opencontainers.image.title="ASF Hermes Phase 3 Container"
+LABEL org.opencontainers.image.description="Hermes runtime confined by a host-enforced container boundary"
+LABEL org.opencontainers.image.vendor="Agent Security Framework"

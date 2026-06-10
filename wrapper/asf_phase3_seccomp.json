@@ -1,0 +1,47 @@
+{
+  "_comment": "ASF Phase 3 seccomp profile. Deny-list with a permissive default so it is architecture-agnostic (works on the Apple Silicon arm64 Docker VM as well as x86_64). An allow-list default-deny profile like the x86-only one in sandbox.py blocks every syscall on arm64 and prevents the container from starting. This profile keeps Docker's intent of removing the most dangerous kernel surface (module loading, kexec, ptrace, mount/namespace manipulation, swap, clock changes) while leaving normal Python/CLI workloads working. A stricter per-arch allow-list profile is future work.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": [
+        "acct",
+        "add_key",
+        "bpf",
+        "clock_adjtime",
+        "clock_settime",
+        "create_module",
+        "delete_module",
+        "finit_module",
+        "get_kernel_syms",
+        "init_module",
+        "kcmp",
+        "kexec_file_load",
+        "kexec_load",
+        "keyctl",
+        "mount",
+        "move_pages",
+        "name_to_handle_at",
+        "nfsservctl",
+        "open_by_handle_at",
+        "perf_event_open",
+        "pivot_root",
+        "ptrace",
+        "query_module",
+        "quotactl",
+        "reboot",
+        "request_key",
+        "set_mempolicy",
+        "settimeofday",
+        "swapoff",
+        "swapon",
+        "sysfs",
+        "umount",
+        "umount2",
+        "uselib",
+        "userfaultfd"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}
