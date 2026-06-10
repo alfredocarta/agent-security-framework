@@ -7,7 +7,6 @@ defense-in-depth layer on top of the Seatbelt profile.
 """
 from __future__ import annotations
 
-import difflib
 import json
 import os
 import re
@@ -121,93 +120,6 @@ def _import_native_registry() -> Any:
     return registry
 
 
-def _lint_skipped(path: str) -> dict[str, str]:
-    suffix = Path(path).suffix or "file"
-    return {"status": "skipped", "message": f"No linter for {suffix} files"}
-
-
-def _write_file(args: dict[str, Any]) -> str:
-    path = args.get("path")
-    if not path or not isinstance(path, str):
-        return _tool_error("write_file: missing required field 'path'. Re-emit the tool call with both 'path' and 'content' set.")
-    if "content" not in args:
-        return _tool_error("write_file: missing required field 'content'. The tool call included a path but no content argument - this is almost always a dropped-arg bug under context pressure. Re-emit the tool call with the full content payload, or use execute_code with hermes_tools.write_file() for very large files.")
-    content = args.get("content")
-    if not isinstance(content, str):
-        return _tool_error(f"write_file: 'content' must be a string, got {type(content).__name__}.")
-    target = _candidate_path(path, _workdir())
-    existed_parent = target.parent.exists()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return json.dumps({"bytes_written": len(content.encode("utf-8")), "dirs_created": not existed_parent, "lint": _lint_skipped(str(target))}, ensure_ascii=False)
-
-
-def _unified_diff(path: Path, before: str, after: str) -> str:
-    return "".join(difflib.unified_diff(
-        before.splitlines(keepends=True),
-        after.splitlines(keepends=True),
-        fromfile=f"a/{path}",
-        tofile=f"b/{path}",
-    ))
-
-
-def _patch_replace(args: dict[str, Any]) -> str:
-    path = args.get("path")
-    old = args.get("old_string")
-    new = args.get("new_string")
-    if not path:
-        return _tool_error("path required")
-    if old is None or new is None:
-        return _tool_error("old_string and new_string required")
-    target = _candidate_path(str(path), _workdir())
-    before = target.read_text(encoding="utf-8")
-    count = before.count(str(old))
-    if count == 0:
-        return json.dumps({"success": False, "error": "Could not find a match for old_string in the file", "_hint": "old_string not found. Use read_file to verify the current content, or search_files to locate the text."}, ensure_ascii=False)
-    if count > 1 and not args.get("replace_all", False):
-        return json.dumps({"success": False, "error": "Found multiple matches for old_string; use replace_all=true to replace all occurrences"}, ensure_ascii=False)
-    after = before.replace(str(old), str(new), -1 if args.get("replace_all", False) else 1)
-    target.write_text(after, encoding="utf-8")
-    return json.dumps({"success": True, "diff": _unified_diff(target, before, after), "files_modified": [str(target)], "lint": _lint_skipped(str(target))}, ensure_ascii=False)
-
-
-def _patch_v4a(args: dict[str, Any]) -> str:
-    text = str(args.get("patch") or "")
-    if not text:
-        return _tool_error("patch content required")
-    files_modified: list[str] = []
-    full_diff = ""
-    blocks = re.split(r"^\*\*\* Update File:\s*", text, flags=re.MULTILINE)[1:]
-    for block in blocks:
-        first, _, rest = block.partition("\n")
-        target = _candidate_path(first.strip(), _workdir())
-        before = target.read_text(encoding="utf-8")
-        after = before
-        minus: str | None = None
-        plus: str | None = None
-        for line in rest.splitlines():
-            if line.startswith("-") and not line.startswith("---"):
-                minus = line[1:]
-            elif line.startswith("+") and not line.startswith("+++"):
-                plus = line[1:]
-                if minus is not None and plus is not None:
-                    after = after.replace(minus, plus, 1)
-                    minus = None
-        target.write_text(after, encoding="utf-8")
-        files_modified.append(str(target))
-        full_diff += _unified_diff(target, before, after)
-    return json.dumps({"success": True, "diff": full_diff, "files_modified": files_modified, "lint": {p: _lint_skipped(p) for p in files_modified}}, ensure_ascii=False)
-
-
-def _patch_file(args: dict[str, Any]) -> str:
-    mode = args.get("mode", "replace")
-    if mode == "replace":
-        return _patch_replace(args)
-    if mode == "patch":
-        return _patch_v4a(args)
-    return _tool_error(f"Unknown mode: {mode}")
-
-
 def main() -> int:
     try:
         req = _load_request()
@@ -233,15 +145,8 @@ def main() -> int:
 
     try:
         os.environ.setdefault("HERMES_WRITE_SAFE_ROOT", str(workdir))
-        if tool in {"write_file", "patch"} and str(workdir).startswith(("/private/var/", "/var/")):
-            # Hermes' native file_tools intentionally reject macOS /private/var
-            # paths. Pytest tmp_path lives there on macOS, so keep the worker's
-            # contract/confinement tests on temp fixtures without touching a real
-            # repo file. Normal Hermes workdirs under /Users take the native path.
-            result = _write_file(args) if tool == "write_file" else _patch_file(args)
-        else:
-            registry = _import_native_registry()
-            result = registry.dispatch(tool, args, **kwargs)
+        registry = _import_native_registry()
+        result = registry.dispatch(tool, args, **kwargs)
         if isinstance(result, str):
             print(result)
         else:
