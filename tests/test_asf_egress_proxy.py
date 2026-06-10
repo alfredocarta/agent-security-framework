@@ -159,8 +159,6 @@ def test_sandbox_allows_only_proxy_network_for_approved_domains(tmp_path):
         "-D",
         f"WORKDIR={tmp_path}",
         "-D",
-        f"READ_ALLOW={tmp_path}",
-        "-D",
         f"PROXY_PORT={proxy_port}",
         "-f",
         str(profile),

@@ -18,9 +18,12 @@
 (allow network-outbound
   (remote tcp (string-append "localhost:" (param "PROXY_PORT"))))
 
-; Allow reads broadly so shells, dynamic loader, locales, Python and Homebrew tools can start.
-; Ring 1 readable path policy is enforced before execution by the ASF Hermes plugin via
-; ASF_HERMES_PATH_ALLOW. Seatbelt still enforces write confinement and network proxy-only egress.
+; Reads are intentionally broad so shells, the dynamic loader, locales, Python and Homebrew
+; tools can start. Reads are NOT confined by this profile: (allow file-read*) permits broad
+; filesystem reads subject only to normal macOS permissions/TCC. The previous Hermes plugin
+; path allowlist gate was removed, and this profile does not consume a READ_ALLOW parameter.
+; Seatbelt enforcement here is limited to write confinement under WORKDIR and proxy-only
+; network egress for these terminal/execute_code subprocesses.
 (allow file-read*)
 
 ; Minimal device access for stdio and process startup.

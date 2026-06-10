@@ -448,19 +448,17 @@ def sandbox_cwd(requested: str | None, root: str) -> str:
 def sandbox_argv(command: list[str], *, asf_root: Path, profile_path: Path | None = None) -> tuple[list[str], str | None]:
     sandbox_exec = shutil.which("sandbox-exec")
     if not sandbox_exec:
-        warning = "sandbox-exec not available, executing without OS sandbox"
-        if env_bool("ASF_HERMES_SANDBOX_FAIL_CLOSED", False):
+        warning = "sandbox unavailable: sandbox-exec not available; refusing to execute unconfined"
+        if env_bool("ASF_HERMES_SANDBOX_ALLOW_UNCONFINED", False) and not env_bool("ASF_HERMES_SANDBOX_FAIL_CLOSED", False):
+            return command, "sandbox-exec not available, executing without OS sandbox because ASF_HERMES_SANDBOX_ALLOW_UNCONFINED=true"
+        if env_bool("ASF_HERMES_SANDBOX_FAIL_CLOSED", True):
             raise RuntimeError(warning)
-        return command, warning
+        raise RuntimeError(warning)
     profile = profile_path or asf_root / "wrapper" / "asf_sandbox.sb"
-    read_allow = env_list("ASF_HERMES_PATH_ALLOW")
-    read_allow_path = str(Path(read_allow[0]).expanduser().resolve()) if read_allow else sandbox_workdir()
     return [
         sandbox_exec,
         "-D",
         f"WORKDIR={sandbox_workdir()}",
-        "-D",
-        f"READ_ALLOW={read_allow_path}",
         "-D",
         f"PROXY_PORT={os.environ.get('ASF_EGRESS_PROXY_PORT', '9')}",
         "-f",
@@ -484,7 +482,15 @@ def sandbox_env() -> dict[str, str]:
 
 
 def run_sandboxed_process(command: list[str], *, cwd: str, asf_root: Path, timeout: int | None = None, profile_path: Path | None = None) -> dict[str, Any]:
-    argv, warning = sandbox_argv(command, asf_root=asf_root, profile_path=profile_path)
+    try:
+        argv, warning = sandbox_argv(command, asf_root=asf_root, profile_path=profile_path)
+    except RuntimeError as exc:
+        return {
+            "error": str(exc),
+            "exit_code": 126,
+            "sandboxed": False,
+            "blocked": True,
+        }
     completed = subprocess.run(
         argv,
         cwd=cwd,

@@ -122,7 +122,7 @@ def test_langgraph_shell_tool_uses_sandbox_when_enabled(monkeypatch, tmp_path):
     assert not side_effect.exists()
     rows = _store_rows(db_path)
     assert rows[0]["output_preview"]
-    assert "sandboxed" in rows[0]["output_preview"]
+    assert "blocked by fake sandbox" in rows[0]["output_preview"]
 
 
 def test_langgraph_demo_graph_blocks_tool(monkeypatch, tmp_path):

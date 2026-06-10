@@ -162,6 +162,13 @@ def main(argv: list[str] | None = None) -> int:
                 "[ASF Hermes wrapper] net allowlist is ASF intent-level only because sandbox/proxy is disabled",
                 file=sys.stderr,
             )
+    if not args.no_sandbox:
+        print(
+            "[ASF Hermes wrapper] sandbox scope: terminal/execute_code subprocesses only; "
+            "writes confined to workdir, network limited to proxy when configured, reads are not confined; "
+            "Hermes runtime and in-process tools are not sandboxed",
+            file=sys.stderr,
+        )
 
     try:
         return subprocess.call([hermes, *hermes_args], env=env)

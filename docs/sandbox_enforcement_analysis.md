@@ -64,8 +64,8 @@ The sandbox profile itself says the key facts:
 `run_sandboxed_process` confirms this is per-process wrapping:
 
 - `asf_core.sandbox_enabled()` reads `ASF_HERMES_SANDBOX`, default false, at lines 431-432.
-- `sandbox_argv` inserts `sandbox-exec -D WORKDIR=... -D READ_ALLOW=... -D PROXY_PORT=... -f asf_sandbox.sb ...` at lines 448-469.
-- If `sandbox-exec` is absent, it warns and executes without OS sandbox unless `ASF_HERMES_SANDBOX_FAIL_CLOSED=true` at lines 448-454.
+- `sandbox_argv` inserts `sandbox-exec -D WORKDIR=... -D PROXY_PORT=... -f asf_sandbox.sb ...` at lines 448-469.
+- If `sandbox-exec` is absent, it returns a blocked sandbox-unavailable result by default. The old unconfined fallback requires `ASF_HERMES_SANDBOX_ALLOW_UNCONFINED=true`, and `ASF_HERMES_SANDBOX_FAIL_CLOSED=true` overrides that opt-out.
 - `run_sandboxed_process` then calls `subprocess.run(argv, ...)` with the sandbox argv at lines 486-496.
 - Only `sandbox_terminal` and `sandbox_execute_code` call `run_sandboxed_process`, at lines 511-516 and 520-525.
 
@@ -123,7 +123,7 @@ Concrete current bypasses or non-guarantees:
    - The sandbox MVP rejects background and PTY terminal only inside `sandbox_terminal` at lines 506-508. If sandbox is off, the original terminal tool behavior applies.
 
 6. Seatbelt does not enforce read restrictions in the current profile.
-   - `asf_sandbox.sb` line 24 allows `file-read*` broadly. The `READ_ALLOW` parameter is passed in `asf_core.sandbox_argv` lines 456-464, but the profile does not use it to restrict file reads.
+   - `asf_sandbox.sb` allows `file-read*` broadly. Earlier versions passed a `READ_ALLOW` parameter, but the profile never consumed it and the parameter has been removed from the Hermes sandbox argv.
    - Therefore sandboxed terminal/code subprocesses can read broadly from the user's filesystem, subject to macOS privacy/TCC and normal Unix permissions, unless another mechanism intervenes. Writes are confined to `WORKDIR` by Seatbelt lines 33-34.
 
 7. Network enforcement is partial.
@@ -562,10 +562,12 @@ What not to claim:
 
 Smallest practical step for a defensible improvement:
 
+Phase 1 implementation status: sandbox-on subprocess execution now fails closed by default if `sandbox-exec` is unavailable. The old unconfined fallback is available only with the explicit development opt-out `ASF_HERMES_SANDBOX_ALLOW_UNCONFINED=true`, unless `ASF_HERMES_SANDBOX_FAIL_CLOSED=true` is also set. The Seatbelt profile and wrapper output now state the scope plainly: only `terminal` and `execute_code` subprocesses are sandboxed; writes are confined to `WORKDIR`; network is proxy-only when the proxy is configured; reads are not confined; the Hermes runtime and in-process tools are not sandboxed.
+
 1. Make enforced sandbox mode fail closed if `sandbox-exec` is absent.
-   - Current `asf_core.sandbox_argv` falls back to unsandboxed execution unless `ASF_HERMES_SANDBOX_FAIL_CLOSED=true` at lines 448-454.
+   - `asf_core.sandbox_argv` now refuses to execute unconfined by default when `sandbox-exec` is unavailable.
 2. Be explicit in CLI output and docs that sandbox applies only to `terminal` and `execute_code` subprocesses.
-3. Remove or clearly label dead allowlist helpers, or wire an allowlist gate back in if it is intended to be active. Do not leave `allowlist_block_reason` looking like an active enforcement path when `on_pre_tool_call` does not call it.
+3. Keep the LangGraph allowlist helpers because `wrapper/langgraph_mvp.py` still calls `allowlist_block_reason`; the Hermes plugin path does not use them.
 4. Tighten the Seatbelt profile if confidentiality matters, especially replacing broad `file-read*` with a realistic read allow strategy. If compatibility requires broad reads, document that reads are not confined.
 
 This still would not be whole-agent confinement, but it would make the current subsystem honest and fail-closed.

@@ -639,6 +639,80 @@ def test_sandbox_execute_code_blocks_network(monkeypatch, tmp_path):
     assert result["exit_code"] != 0
 
 
+def test_sandbox_missing_blocks_by_default(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    side_effect = tmp_path / "should-not-run.txt"
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_WORKDIR", str(tmp_path / "sandbox"))
+    monkeypatch.delenv("ASF_HERMES_SANDBOX_ALLOW_UNCONFINED", raising=False)
+    monkeypatch.delenv("ASF_HERMES_SANDBOX_FAIL_CLOSED", raising=False)
+    monkeypatch.setattr(plugin.asf_core.shutil, "which", lambda name: None if name == "sandbox-exec" else shutil.which(name))
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("sandboxed command must not execute when sandbox-exec is missing")
+
+    monkeypatch.setattr(plugin.asf_core.subprocess, "run", fail_run)
+
+    raw = plugin._sandbox_terminal({"command": f"touch {side_effect}"})
+    result = json.loads(raw)
+
+    assert result["blocked"] is True
+    assert result["sandboxed"] is False
+    assert result["exit_code"] == 126
+    assert "sandbox unavailable" in result["error"]
+    assert not side_effect.exists()
+
+
+def test_sandbox_missing_allow_unconfined_restores_old_fallback(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_WORKDIR", str(tmp_path / "sandbox"))
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_ALLOW_UNCONFINED", "true")
+    monkeypatch.delenv("ASF_HERMES_SANDBOX_FAIL_CLOSED", raising=False)
+    monkeypatch.setattr(plugin.asf_core.shutil, "which", lambda name: None if name == "sandbox-exec" else shutil.which(name))
+    calls = []
+
+    class Completed:
+        stdout = "ran unconfined"
+        stderr = ""
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return Completed()
+
+    monkeypatch.setattr(plugin.asf_core.subprocess, "run", fake_run)
+
+    raw = plugin._sandbox_terminal({"command": "printf ok"})
+    result = json.loads(raw)
+
+    assert calls
+    assert calls[0][:2] == ["/bin/sh", "-c"]
+    assert result["sandboxed"] is False
+    assert result["exit_code"] == 0
+    assert result["sandbox_warning"].endswith("ASF_HERMES_SANDBOX_ALLOW_UNCONFINED=true")
+
+
+def test_sandbox_missing_fail_closed_overrides_allow_unconfined(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_WORKDIR", str(tmp_path / "sandbox"))
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_ALLOW_UNCONFINED", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_FAIL_CLOSED", "true")
+    monkeypatch.setattr(plugin.asf_core.shutil, "which", lambda name: None if name == "sandbox-exec" else shutil.which(name))
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("fail-closed must override unconfined fallback")
+
+    monkeypatch.setattr(plugin.asf_core.subprocess, "run", fail_run)
+
+    result = json.loads(plugin._sandbox_execute_code({"code": "print('nope')"}))
+
+    assert result["blocked"] is True
+    assert result["sandboxed"] is False
+    assert result["exit_code"] == 126
+
+
 class _FakeRegistry:
     """Stand-in for the framework registry module, injected via sys.modules so
     register_hermes_agent's lazy `import registry` resolves to it."""
