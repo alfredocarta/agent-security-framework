@@ -406,6 +406,38 @@ def _sandbox_execute_code(args: dict[str, Any]) -> str:
     return asf_core.sandbox_execute_code(args, asf_root=DEFAULT_ASF_ROOT)
 
 
+def _sandbox_file_tools_enabled() -> bool:
+    return _env_bool("ASF_HERMES_SANDBOX_FILE_TOOLS", True)
+
+
+def _sandbox_file_tool(name: str, args: dict[str, Any], kwargs: dict[str, Any] | None = None) -> str:
+    payload = {
+        "tool": name,
+        "args": args,
+        "kwargs": {k: v for k, v in (kwargs or {}).items() if k in {"task_id"}},
+    }
+    worker = DEFAULT_ASF_ROOT / "wrapper" / "asf_file_worker.py"
+    result = _run_sandboxed_process(
+        [sys.executable, str(worker), json.dumps(payload, ensure_ascii=False)],
+        cwd=_sandbox_workdir(),
+    )
+    if result.get("blocked"):
+        return json.dumps(result, ensure_ascii=False)
+    output = str(result.get("output", "")).strip()
+    if result.get("exit_code") not in (0, None):
+        return json.dumps({"error": output or f"sandboxed file worker failed with exit_code {result.get('exit_code')}"}, ensure_ascii=False)
+    if not output:
+        return json.dumps({"error": "sandboxed file worker produced no output"}, ensure_ascii=False)
+    try:
+        # Validate that the worker emitted the native Hermes payload. Some native
+        # tools (notably truncated search_files) append a human hint after the JSON
+        # object, so accept a JSON object prefix and return the original string.
+        json.JSONDecoder().raw_decode(output)
+        return output
+    except Exception:
+        return json.dumps({"error": f"sandboxed file worker produced invalid JSON: {output[:500]}"}, ensure_ascii=False)
+
+
 def _persist_dispatch_output(
     *,
     tool_name: str,
@@ -459,6 +491,7 @@ def install_dispatch_wrapper() -> None:
         session_id = str(kwargs.get("session_id", "") or "")
         tool_call_id = str(kwargs.get("tool_call_id", "") or "")
         sandboxed = _sandbox_enabled()
+        file_tool_sandboxed = sandboxed and _sandbox_file_tools_enabled() and name in {"read_file", "write_file", "patch", "search_files"}
         start = time.monotonic()
         result: Any = None
         try:
@@ -466,6 +499,8 @@ def install_dispatch_wrapper() -> None:
                 result = _sandbox_terminal(call_args)
             elif sandboxed and name == "execute_code":
                 result = _sandbox_execute_code(call_args)
+            elif file_tool_sandboxed:
+                result = _sandbox_file_tool(name, call_args, kwargs)
             else:
                 result = original(name, args, **kwargs)
             return result

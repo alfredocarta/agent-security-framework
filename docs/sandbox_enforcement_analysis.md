@@ -554,7 +554,6 @@ What not to claim:
 
 - Do not claim ASF currently confines the Hermes agent at kernel level.
 - Do not claim the kill-switch is unbypassable if Hermes or plugin paths change.
-- Do not claim file tools are OS-sandboxed.
 - Do not claim network egress is globally enforced for the runtime or all tools.
 - Do not claim read confinement from the current Seatbelt profile, because `file-read*` is broadly allowed.
 
@@ -562,7 +561,7 @@ What not to claim:
 
 Smallest practical step for a defensible improvement:
 
-Phase 1 implementation status: sandbox-on subprocess execution now fails closed by default if `sandbox-exec` is unavailable. The old unconfined fallback is available only with the explicit development opt-out `ASF_HERMES_SANDBOX_ALLOW_UNCONFINED=true`, unless `ASF_HERMES_SANDBOX_FAIL_CLOSED=true` is also set. The Seatbelt profile and wrapper output now state the scope plainly: only `terminal` and `execute_code` subprocesses are sandboxed; writes are confined to `WORKDIR`; network is proxy-only when the proxy is configured; reads are not confined; the Hermes runtime and in-process tools are not sandboxed.
+Phase 1 implementation status: sandbox-on subprocess execution now fails closed by default if `sandbox-exec` is unavailable. The old unconfined fallback is available only with the explicit development opt-out `ASF_HERMES_SANDBOX_ALLOW_UNCONFINED=true`, unless `ASF_HERMES_SANDBOX_FAIL_CLOSED=true` is also set. The Seatbelt profile and wrapper output now state the scope plainly: subprocesses routed through the sandbox runner get write confinement to `WORKDIR`; network is proxy-only when the proxy is configured; reads are not confined; the Hermes runtime itself is not sandboxed.
 
 1. Make enforced sandbox mode fail closed if `sandbox-exec` is absent.
    - `asf_core.sandbox_argv` now refuses to execute unconfined by default when `sandbox-exec` is unavailable.
@@ -574,13 +573,11 @@ This still would not be whole-agent confinement, but it would make the current s
 
 ### Phase 2: Move file tools out-of-process
 
-Next high-value step:
+Phase 2 implementation status: `read_file`, `write_file`, `patch`, and `search_files` are routed through `run_sandboxed_process` when `ASF_HERMES_SANDBOX=true` and `ASF_HERMES_SANDBOX_FILE_TOOLS` is enabled. The flag defaults to enabled and can be set to `false` to restore native in-process dispatch while the sandbox remains on. If `sandbox-exec` is unavailable while sandboxing is requested, these file tools fail closed with the same blocked result shape used by Phase 1 instead of falling back to in-process execution.
 
-- Route `read_file`, `write_file`, `patch`, and `search_files` through the same sandbox runner abstraction instead of in-process registry handlers.
-- On macOS, use sandboxed helper subprocesses as a transitional design.
-- On Linux, use bubblewrap/nsjail plus Landlock/seccomp.
+The security gain is specific: writes are confined to `WORKDIR` by Seatbelt and by explicit worker path checks, file tools no longer execute inside the unconfined Hermes runtime, and all sandboxed tool subprocesses share one runner choke point. Reads remain broad under the current profile because `(allow file-read*)` is still present.
 
-This closes the biggest mismatch: file tools are currently the tools users most expect to be confined, but they are purely cooperative.
+This closes the previous biggest mismatch for file writes. It is still not whole-agent confinement, and it is not a read-confidentiality boundary.
 
 ### Phase 3: Container or VM enforced mode
 

@@ -780,3 +780,84 @@ def test_reset_mode_reinstates_on_every_check(monkeypatch):
     # Opt-in reset mode (smoke tests / scenario resets) clears suspension explicitly.
     assert fake.added == 1
     assert fake.reinstated == 1
+
+
+
+def test_file_tool_routes_to_sandbox_when_enabled(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._DISPATCH_WRAPPED = False
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_FILE_TOOLS", "true")
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "ok"))
+
+    calls = {"original": 0, "sandbox": 0}
+
+    def fake_dispatch(name, args=None, **kwargs):
+        calls["original"] += 1
+        return '{"native": false}'
+
+    def fake_file_tool(name, args, kwargs=None):
+        calls["sandbox"] += 1
+        assert name == "write_file"
+        assert kwargs["task_id"] == "task-file"
+        return '{"bytes_written": 2, "dirs_created": false}'
+
+    monkeypatch.setattr(plugin, "_sandbox_file_tool", fake_file_tool)
+    reg = _install_fake_tool_registry(monkeypatch, fake_dispatch)
+    args = {"path": str(tmp_path / "x.txt"), "content": "ok"}
+    plugin.on_pre_tool_call(tool_name="write_file", args=args, task_id="task-file", session_id="sess-file")
+    out = reg.dispatch("write_file", args, task_id="task-file", session_id="sess-file")
+
+    assert json.loads(out)["bytes_written"] == 2
+    assert calls == {"original": 0, "sandbox": 1}
+
+
+def test_file_tool_sandbox_off_uses_original_dispatch(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._DISPATCH_WRAPPED = False
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.delenv("ASF_HERMES_SANDBOX", raising=False)
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "ok"))
+    monkeypatch.setattr(plugin, "_sandbox_file_tool", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not sandbox")))
+
+    def fake_dispatch(name, args=None, **kwargs):
+        return '{"native": true}'
+
+    reg = _install_fake_tool_registry(monkeypatch, fake_dispatch)
+    args = {"path": str(tmp_path / "x.txt"), "content": "ok"}
+    plugin.on_pre_tool_call(tool_name="write_file", args=args, task_id="task-native", session_id="sess-native")
+    out = reg.dispatch("write_file", args, task_id="task-native", session_id="sess-native")
+    assert json.loads(out)["native"] is True
+
+
+def test_file_tool_flag_false_disables_routing(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    plugin._DISPATCH_WRAPPED = False
+    monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
+    monkeypatch.setenv("ASF_HERMES_MODE", "monitor")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX", "true")
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_FILE_TOOLS", "false")
+    monkeypatch.setattr(plugin, "run_asf_check", lambda *a, **k: ("ALLOW", "ok"))
+    monkeypatch.setattr(plugin, "_sandbox_file_tool", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not sandbox")))
+
+    def fake_dispatch(name, args=None, **kwargs):
+        return '{"native": true}'
+
+    reg = _install_fake_tool_registry(monkeypatch, fake_dispatch)
+    args = {"path": str(tmp_path / "x.txt"), "content": "ok"}
+    plugin.on_pre_tool_call(tool_name="write_file", args=args, task_id="task-flag", session_id="sess-flag")
+    out = reg.dispatch("write_file", args, task_id="task-flag", session_id="sess-flag")
+    assert json.loads(out)["native"] is True
+
+
+def test_file_tool_sandbox_missing_fails_closed(monkeypatch, tmp_path):
+    plugin = load_plugin_module()
+    monkeypatch.setenv("ASF_HERMES_SANDBOX_WORKDIR", str(tmp_path))
+    monkeypatch.setattr(plugin.asf_core.shutil, "which", lambda name: None if name == "sandbox-exec" else shutil.which(name))
+    result = json.loads(plugin._sandbox_file_tool("read_file", {"path": str(tmp_path / "x.txt")}, {"task_id": "t"}))
+    assert result["blocked"] is True
+    assert result["sandboxed"] is False
+    assert result["exit_code"] == 126
