@@ -343,24 +343,17 @@ def _extract_tool_output(payload):
     return None
 
 
-def _suggest_asf_command(tool_name: str, text: str) -> str:
-    if tool_name == "Bash":
-        try:
-            parts = shlex.split(text)
-        except ValueError:
-            parts = []
-        if parts:
-            return " ".join([f"asf_{parts[0]}"] + parts[1:])
-        return "asf_bash <command>"
-    return f"asf_{tool_name.lower()}"
-
-
-def _block_message(tool_name: str, text: str, reason: str) -> str:
-    suggestion = _suggest_asf_command(tool_name, text)
+def _block_message(tool_name: str, reason: str) -> str:
     return (
-        f"[ASF DENY] comando bloccato: {reason}\n"
-        f"Riesegui tramite il comando con prefisso ASF, ad esempio: `{suggestion}`.\n"
-        "Kill-switch sviluppo: esporta ASF_HOOK_MONITOR_ONLY=true per tornare in monitor."
+        f"[ASF SECURITY BLOCK]\n"
+        f"Tool blocked: {tool_name}\n"
+        f"Reason: {reason}\n"
+        f"\n"
+        f"The tool call was NOT executed. Next steps:\n"
+        f"1. Ask the user to explicitly review and approve this specific action.\n"
+        f"2. Reformulate the request to avoid the flagged pattern.\n"
+        f"3. If this is a false positive, the user can disable enforcement:\n"
+        f"     export ASF_HOOK_MONITOR_ONLY=true\n"
     )
 
 
@@ -448,7 +441,7 @@ def main():
                 sys.exit(0)
             if verdict == "ALLOW":
                 sys.exit(0)
-            print(_block_message(tool_name, text, reason), flush=True)
+            print(_block_message(tool_name, reason), flush=True)
             sys.exit(2)
         except Exception as exc:
             last_error = exc
