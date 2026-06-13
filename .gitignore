@@ -27,3 +27,4 @@ graphify-out/
 
 # local agent state
 .claude/
+test_reports/
