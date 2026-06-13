@@ -60,6 +60,20 @@ def _semantic_probe(text: str) -> bool:
     return any(pattern.search(text) for pattern in _RE_SEMANTIC_PROBE)
 
 
+def _kill_switch_context(agent_id: str, tool_input: str) -> tuple[str, dict]:
+    """Build a diagnostic suffix and metadata dict for KILL_SWITCH audit events."""
+    excerpt = str(tool_input)[:200].replace("\n", " ")
+    recent = AUDITOR.recent_outcomes_for(agent_id, n=3)
+    preceded = "HITL_REQUESTED" in recent
+    suffix = f" | preceded_by_hitl={preceded} | input[:200]='{excerpt}'"
+    meta = {
+        "input_excerpt": excerpt,
+        "preceded_by_hitl": preceded,
+        "recent_outcomes": recent,
+    }
+    return suffix, meta
+
+
 def _select_auditor():
     if os.environ.get("ASF_AGT_AUDIT", "").lower() != "true":
         return _ASF_AUDITOR
@@ -468,8 +482,11 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
     is_dangerous, matched_pattern = _stage1_regex(tool_input)
     if is_dangerous:
         registry.suspend_agent(agent_id)
-        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", f"Stage 1 regex match: {matched_pattern}",
-                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+        _ctx_suffix, _ctx_meta = _kill_switch_context(agent_id, tool_input)
+        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
+                          f"Stage 1 regex match: {matched_pattern}{_ctx_suffix}",
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                          metadata=_ctx_meta)
         return "DENY", "KILL SWITCH ACTIVATED (pattern detected)."
     AUDITOR.log_event(agent_id, tool_name, "STAGE_1_PASS", "No dangerous pattern matched",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
@@ -481,8 +498,11 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
 
     if verdict == "DANGEROUS":
         registry.suspend_agent(agent_id)
-        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", f"Stage 2 BLOCK: dangerous_proba >= {BLOCK_THRESHOLD} (confidence: {confidence:.2f})",
-                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
+        _ctx_suffix, _ctx_meta = _kill_switch_context(agent_id, tool_input)
+        AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
+                          f"Stage 2 BLOCK: dangerous_proba >= {BLOCK_THRESHOLD} (confidence: {confidence:.2f}){_ctx_suffix}",
+                          trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
+                          metadata=_ctx_meta)
         return "DENY", f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
 
     stage25_enabled = os.environ.get("ASF_DISABLE_STAGE25", "").lower() != "true"
@@ -570,10 +590,11 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                     # ASF_STAGE25_SUSPEND_ON_KILL=true to restore agent-wide suspension.
                     if os.environ.get("ASF_STAGE25_SUSPEND_ON_KILL", "").lower() == "true":
                         registry.suspend_agent(agent_id)
+                    _ctx_suffix, _ctx_meta = _kill_switch_context(agent_id, tool_input)
                     AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
-                                      f"Stage 2.5 DeBERTa: {stage25_verdict} p={stage25_score:.2f}",
+                                      f"Stage 2.5 DeBERTa: {stage25_verdict} p={stage25_score:.2f}{_ctx_suffix}",
                                       trace_id=trace_id, latency_ms=_ms(), confidence=stage25_score, session_id=session_id,
-                                      metadata={"deberta_injection_score": stage25_score})
+                                      metadata={**{"deberta_injection_score": stage25_score}, **_ctx_meta})
                     return "DENY", f"KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa: {stage25_verdict} p={stage25_score:.2f})."
 
             if stage25_verdict == "SAFE":
@@ -597,9 +618,11 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                     if stage25b_verdict == "DANGEROUS":
                         if os.environ.get("ASF_STAGE25_SUSPEND_ON_KILL", "").lower() == "true":
                             registry.suspend_agent(agent_id)
+                        _ctx_suffix, _ctx_meta = _kill_switch_context(agent_id, tool_input)
                         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
-                                          "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)",
-                                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                                          f"KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard){_ctx_suffix}",
+                                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                                          metadata=_ctx_meta)
                         return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)."
 
                     if stage25b_verdict == "SAFE":

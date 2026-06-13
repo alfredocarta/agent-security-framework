@@ -47,6 +47,24 @@ class AuditTrail:
     def last_hash_for(self, agent_id):
         return self._last_hash_by_agent.get(agent_id)
 
+    def recent_outcomes_for(self, agent_id: str, n: int = 3) -> list[str]:
+        """Return the last n outcome strings for agent_id, newest first. Never raises."""
+        try:
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(AuditModel.outcome)
+                    .filter(AuditModel.agent_id == agent_id)
+                    .order_by(AuditModel.timestamp.desc())
+                    .limit(n)
+                    .all()
+                )
+                return [row[0] for row in rows]
+            finally:
+                db.close()
+        except Exception:
+            return []
+
     def log_event(self, agent_id, action, outcome, reason,
                   *, trace_id=None, latency_ms=None, confidence=None,
                   metadata=None, session_id=None):

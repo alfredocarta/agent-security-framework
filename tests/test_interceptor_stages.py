@@ -127,5 +127,5 @@ class TestStageThresholds:
         assert result[0] == "DENY"
         assert "Stage 2.5 DeBERTa: DANGEROUS p=0.99" in result[1]
         kill = next(e for e in events if e["outcome"] == "KILL_SWITCH")
-        assert kill["reason"] == "Stage 2.5 DeBERTa: DANGEROUS p=0.99"
+        assert "Stage 2.5 DeBERTa: DANGEROUS p=0.99" in kill["reason"]
         assert kill["kwargs"]["confidence"] == 0.987
