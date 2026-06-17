@@ -29,8 +29,19 @@ import struct
 import subprocess
 import time
 import fcntl
+import re as _re
 
 from claude_trace_store import get_default_store, make_tool_call_id
+from interceptor import make_session_id as _make_session_id
+
+_TSID = _re.compile(r'^\d{8}_\d{6}_[0-9a-f]{6}$')
+_UUID = _re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', _re.I)
+
+
+def _norm_sid(sid):
+    if sid and (_TSID.match(sid) or _UUID.match(sid)):
+        return sid
+    return _make_session_id()
 
 RUNTIME_DIR     = os.path.expanduser("~/.cache/asf-hook")
 SOCKET_PATH     = os.path.join(RUNTIME_DIR, "asf_hook.sock")
@@ -367,11 +378,17 @@ def _handle_post_tool_use(payload: dict) -> None:
     if result is None:
         return
     try:
-        get_default_store().finish_trace(
+        session_id = _norm_sid(payload.get("session_id"))
+        updated = get_default_store().finish_trace(
             result=result,
             tool_call_id=tool_call_id,
-            session_id=payload.get("session_id"),
+            session_id=session_id,
         )
+        if not updated:
+            get_default_store().finish_trace(
+                result=result,
+                tool_call_id=tool_call_id,
+            )
     except Exception:
         if FAIL_CLOSED:
             print("[ASF DENY] failed to persist PostToolUse output", flush=True)
@@ -402,55 +419,10 @@ def main():
         _handle_post_tool_use(payload)
         sys.exit(0)
 
-    if not isinstance(tool_input, dict):
-        _fail_open("invalid hook request")
-
-    if tool_name not in TOOL_MAP:
-        sys.exit(2 if FAIL_CLOSED else 0)
-
-    asf_tool, extractor = TOOL_MAP[tool_name]
-    text = extractor(tool_input)
-    if not isinstance(text, str):
-        _fail_open("invalid tool command payload")
-    if not text or not text.strip():
-        sys.exit(0)
-
-    if tool_name == "Bash" and is_bash_passthrough(text):
-        sys.exit(0)
-
-    last_error = None
-    for _ in range(RETRIES + 1):
-        try:
-            metadata = {
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-                "tool_call_id": make_tool_call_id(payload, tool_name, tool_input),
-                "session_id": payload.get("session_id"),
-                "transcript_path": payload.get("transcript_path"),
-            }
-            data = query_daemon(asf_tool, text, metadata)
-            verdict = data.get("verdict")
-            if verdict not in {"ALLOW", "DENY"}:
-                raise ValueError(f"invalid daemon verdict: {verdict!r}")
-            reason = data.get("reason", "")
-            if MONITOR_ONLY:
-                # Observability only: the daemon already recorded this call in the audit
-                # trail. Never block, whatever the verdict.
-                if verdict == "DENY":
-                    print(f"[ASF monitor] would block {tool_name}: {reason}", file=sys.stderr, flush=True)
-                sys.exit(0)
-            if verdict == "ALLOW":
-                sys.exit(0)
-            print(_block_message(tool_name, reason), flush=True)
-            sys.exit(2)
-        except Exception as exc:
-            last_error = exc
-            time.sleep(0.1)
-
-    if FAIL_CLOSED:
-        print(f"[ASF DENY] hook error: {last_error}", flush=True)
-        sys.exit(2)
-    print(f"[ASF WARN] fail-open: {last_error}", file=sys.stderr, flush=True)
+    # PreToolUse: asf-rust-hook ran first in the chain and handled Stage 1 + L1.5
+    # + Python daemon forwarding for UNCERTAIN cases. Ensure the Python daemon is
+    # running so it is available for those UNCERTAIN forwarding calls.
+    ensure_daemon()
     sys.exit(0)
 
 

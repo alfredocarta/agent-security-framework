@@ -1,7 +1,7 @@
 import os
 import json
 import hashlib
-from sqlalchemy import create_engine, Column, String, JSON, DateTime, Text
+from sqlalchemy import create_engine, Column, String, JSON, DateTime, Text, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -27,7 +27,9 @@ class AuditModel(Base):
     action = Column(String)
     outcome = Column(String)
     reason = Column(String)
+    human_reason = Column(String, nullable=True)
     prev_hash = Column(String)
+    trace_id = Column(String, nullable=True)
 
 class PoliciesModel(Base):
     __tablename__ = "policies"
@@ -36,6 +38,13 @@ class PoliciesModel(Base):
     content_hash = Column(Text)
 
 Base.metadata.create_all(bind=engine)
+
+with engine.connect() as _conn:
+    try:
+        _conn.execute(text("ALTER TABLE audit_trail ADD COLUMN trace_id TEXT"))
+        _conn.commit()
+    except Exception:
+        pass  # column already exists
 
 def get_agent_permissions(agent_id):
     db = SessionLocal()

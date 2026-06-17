@@ -10,8 +10,15 @@ import atexit
 import joblib
 from langchain_openai import ChatOpenAI
 import registry
+from assessment import build_assessment
 from audit import AUDITOR as _ASF_AUDITOR
 from hardening import _classifier_gate_score
+
+
+def make_session_id() -> str:
+    import datetime
+    ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return f"{ts}_{uuid.uuid4().hex[:6]}"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 POLICIES_PATH = os.path.join(BASE_DIR, "policies.yaml")
@@ -326,12 +333,13 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
             agent_id,
             tool_name,
             "HEURISTIC_BLOCK",
-            f"Blocked by heuristic fast-path (score={heuristic_score:.2f})",
+            f"Blocked by heuristic fast-path (score={heuristic_score:.0%})",
             trace_id=trace_id,
             latency_ms=latency_ms(),
             session_id=session_id,
+            human_reason=build_assessment("HEURISTIC_BLOCK", score=f"{heuristic_score:.0%}"),
         )
-        return "DENY", f"BLOCKED by heuristic (score={heuristic_score:.2f})"
+        return "DENY", f"BLOCKED by heuristic (score={heuristic_score:.0%})"
 
     if heuristic_score <= HEURISTIC_CLEAR_THRESHOLD and not os.environ.get("ASF_ALWAYS_STAGE25", "").lower() == "true":
         if probe_fired:
@@ -352,12 +360,13 @@ def _heuristic_fastpath(agent_id, tool_name, tool_input, trace_id, latency_ms, s
             agent_id,
             tool_name,
             "HEURISTIC_CLEAR",
-            f"Cleared by heuristic fast-path (score={heuristic_score:.2f})",
+            f"Cleared by heuristic fast-path ({heuristic_score:.0%})",
             trace_id=trace_id,
             latency_ms=latency_ms(),
             session_id=session_id,
+            human_reason=build_assessment("HEURISTIC_CLEAR", score=f"{heuristic_score:.0%}"),
         )
-        return "ALLOW", f"Cleared by heuristic (score={heuristic_score:.2f})"
+        return "ALLOW", f"Cleared by heuristic ({heuristic_score:.0%})"
 
     _FASTPATH_STATS["ML_INVOKED"] += 1
     return None
@@ -452,12 +461,14 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
     allowed_tools = registry.get_agent_permissions(agent_id)
     if not allowed_tools:
         AUDITOR.log_event(agent_id, tool_name, "BLOCKED", "Agent suspended or not found",
-                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                          human_reason=build_assessment("AGENT_SUSPENDED"))
         return "DENY", "ACCESS DENIED: Agent is suspended."
 
     if tool_name not in allowed_tools:
         AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Tool '{tool_name}' not in permissions: {allowed_tools}",
-                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                          human_reason=build_assessment("TOOL_NOT_PERMITTED"))
         return "DENY", f"ACCESS DENIED: '{tool_name}' not authorized for {agent_id}."
 
     _allowlist_cfg = _policies.get("path_allowlist", {})
@@ -467,6 +478,7 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         _input_str = str(tool_input)
         if any(_input_str.startswith(p) for p in _allowlist_paths):
             AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Path allowlist: read-only tool on trusted path",
+                              human_reason=build_assessment("ALLOWLIST_CLEAR"),
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
             return "ALLOW", "Authorized (path allowlist)."
 
@@ -486,7 +498,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
                           f"Stage 1 regex match: {matched_pattern}{_ctx_suffix}",
                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                          metadata=_ctx_meta)
+                          metadata=_ctx_meta,
+                          human_reason=build_assessment("REGEX_BLOCK", pattern=matched_pattern))
         return "DENY", "KILL SWITCH ACTIVATED (pattern detected)."
     AUDITOR.log_event(agent_id, tool_name, "STAGE_1_PASS", "No dangerous pattern matched",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
@@ -502,7 +515,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
                           f"Stage 2 BLOCK: dangerous_proba >= {BLOCK_THRESHOLD} (confidence: {confidence:.2f}){_ctx_suffix}",
                           trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
-                          metadata=_ctx_meta)
+                          metadata=_ctx_meta,
+                          human_reason=build_assessment("STAGE2_BLOCK", confidence=f"{confidence:.0%}"))
         return "DENY", f"KILL SWITCH ACTIVATED (classifier confidence: {confidence:.2f})."
 
     stage25_enabled = os.environ.get("ASF_DISABLE_STAGE25", "").lower() != "true"
@@ -518,7 +532,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
             if _stage3_llm(tool_input):
                 registry.suspend_agent(agent_id)
                 AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH", "Stage 3 double-check: dangerous",
-                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                                  human_reason=build_assessment("STAGE3_LLM_BLOCK_CONFIRM"))
                 return "DENY", "KILL SWITCH ACTIVATED (Stage 3 double-check)."
         if stage25_enabled and always_stage25:
             soft_escalate = True
@@ -544,7 +559,8 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
             )
         else:
             AUDITOR.log_event(agent_id, tool_name, "ALLOWED", f"Stage 2 PASS: dangerous_proba <= {PASS_THRESHOLD} (confidence: {confidence:.2f})",
-                              trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id)
+                              trace_id=trace_id, latency_ms=_ms(), confidence=confidence, session_id=session_id,
+                              human_reason=build_assessment("STAGE2_CLEAR", confidence=f"{confidence:.0%}"))
             return "ALLOW", f"Authorized (classifier confidence: {confidence:.2f})."
 
     if not soft_escalate:
@@ -594,13 +610,15 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                     AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
                                       f"Stage 2.5 DeBERTa: {stage25_verdict} p={stage25_score:.2f}{_ctx_suffix}",
                                       trace_id=trace_id, latency_ms=_ms(), confidence=stage25_score, session_id=session_id,
-                                      metadata={**{"deberta_injection_score": stage25_score}, **_ctx_meta})
+                                      metadata={**{"deberta_injection_score": stage25_score}, **_ctx_meta},
+                                      human_reason=build_assessment("STAGE25_DEBERTA_BLOCK", confidence=f"{stage25_score:.0%}"))
                     return "DENY", f"KILL SWITCH ACTIVATED (Stage 2.5 DeBERTa: {stage25_verdict} p={stage25_score:.2f})."
 
             if stage25_verdict == "SAFE":
                 AUDITOR.log_event(agent_id, tool_name, "ALLOWED",
                                   "Authorized (Stage 2.5 DeBERTa cleared)",
-                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                                  trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                                  human_reason=build_assessment("STAGE25_DEBERTA_CLEAR"))
                 return "ALLOW", "Authorized (Stage 2.5 DeBERTa cleared)."
 
             if os.environ.get("ASF_DISABLE_STAGE25B", "").lower() != "true":
@@ -622,13 +640,15 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
                         AUDITOR.log_event(agent_id, tool_name, "KILL_SWITCH",
                                           f"KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard){_ctx_suffix}",
                                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                                          metadata=_ctx_meta)
+                                          metadata=_ctx_meta,
+                                          human_reason=build_assessment("STAGE25B_BLOCK"))
                         return "DENY", "KILL SWITCH ACTIVATED (Stage 2.5b Prompt Guard)."
 
                     if stage25b_verdict == "SAFE":
                         AUDITOR.log_event(agent_id, tool_name, "ALLOWED",
                                           "Authorized (Stage 2.5b Prompt Guard cleared)",
-                                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id)
+                                          trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
+                                          human_reason=build_assessment("STAGE25B_CLEAR"))
                         return "ALLOW", "Authorized (Stage 2.5b Prompt Guard cleared)."
 
                     if stage25b_verdict == "UNAVAILABLE":
@@ -670,21 +690,25 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
             if onnx_result == "DANGEROUS":
                 AUDITOR.log_event(agent_id, tool_name, "BLOCKED", "Stage 3 ONNX Prompt Guard: dangerous",
                                   trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                                  metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+                                  metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"},
+                                  human_reason=build_assessment("STAGE3_ONNX_BLOCK"))
                 return "DENY", "BLOCKED by Stage 3 ONNX (Prompt Guard)"
             if onnx_result == "SAFE":
                 AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 3 ONNX Prompt Guard cleared - safe input",
                                   trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                                  metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+                                  metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"},
+                                  human_reason=build_assessment("STAGE3_ONNX_CLEAR"))
                 return "ALLOW", "Authorized (Stage 3 ONNX cleared)"
             AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Stage 3 ONNX uncertain - fail closed ({onnx_result})",
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                              metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+                              metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"},
+                              human_reason=build_assessment("STAGE3_ONNX_UNCERTAIN"))
             return "DENY", "Stage 3 ONNX uncertain - fail closed"
         except Exception as e:
             AUDITOR.log_event(agent_id, tool_name, "BLOCKED", f"Stage 3 ONNX error - fail closed: {e}",
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                              metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"})
+                              metadata={"model": "Llama-Prompt-Guard-2-86M-onnx", "provider": "gravitee"},
+                              human_reason=build_assessment("STAGE3_ONNX_ERROR"))
             return "DENY", f"Stage 3 ONNX error - fail closed: {e}"
 
     elif _STAGE3_BACKEND == "openrouter":
@@ -695,11 +719,13 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
         if _stage3_openrouter(tool_input):
             AUDITOR.log_event(agent_id, tool_name, "BLOCKED", "Stage 3 OpenRouter: dangerous",
                               trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                              metadata={"model": model_name, "provider": "openrouter"})
+                              metadata={"model": model_name, "provider": "openrouter"},
+                              human_reason=build_assessment("STAGE3_LLM_BLOCK"))
             return "DENY", "BLOCKED by Stage 3 OpenRouter"
         AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 3 OpenRouter cleared - safe input",
                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                          metadata={"model": model_name, "provider": "openrouter"})
+                          metadata={"model": model_name, "provider": "openrouter"},
+                          human_reason=build_assessment("STAGE3_LLM_CLEAR"))
         return "ALLOW", "Authorized (Stage 3 OpenRouter cleared)."
 
     AUDITOR.log_event(agent_id, tool_name, "STAGE_3_START", "LLM semantic analysis",
@@ -723,12 +749,14 @@ def security_interceptor(agent_id, tool_name, tool_input, session_id=None, use_f
             })
         AUDITOR.log_event(agent_id, tool_name, "HITL_REQUESTED", "Stage 3 LLM flagged as dangerous",
                           trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                          metadata=metadata)
+                          metadata=metadata,
+                          human_reason=build_assessment("HITL_REQUESTED"))
         return "HITL", "Action paused for HUMAN APPROVAL (flagged by Stage 3 LLM)."
 
     AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Stage 3 LLM cleared - safe input",
                       trace_id=trace_id, latency_ms=_ms(), session_id=session_id,
-                      metadata={"model": "gemma2:2b", "provider": "ollama"})
+                      metadata={"model": "gemma2:2b", "provider": "ollama"},
+                      human_reason=build_assessment("HITL_CLEAR"))
     return "ALLOW", "Authorized."
 
 

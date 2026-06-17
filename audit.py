@@ -67,7 +67,7 @@ class AuditTrail:
 
     def log_event(self, agent_id, action, outcome, reason,
                   *, trace_id=None, latency_ms=None, confidence=None,
-                  metadata=None, session_id=None):
+                  metadata=None, session_id=None, human_reason=None):
         with _audit_lock:
             db = SessionLocal()
             try:
@@ -88,7 +88,9 @@ class AuditTrail:
                     action=action,
                     outcome=outcome,
                     reason=reason,
-                    prev_hash=prev_hash
+                    human_reason=human_reason,
+                    prev_hash=prev_hash,
+                    trace_id=trace_id
                 )
 
                 db.add(event)

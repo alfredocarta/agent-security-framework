@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +83,8 @@ def run_action(command: str, *, workdir: str) -> dict[str, Any]:
     This is an opt-in feasibility spike for synthetic commands on macOS. It must not be
     used as a wrapper for a real interactive user shell.
     """
-    action_id = str(uuid.uuid4())
+    from interceptor import make_session_id
+    action_id = make_session_id()
     workdir_path = Path(workdir).expanduser().resolve()
     workdir_path.mkdir(parents=True, exist_ok=True)
     workdir_abs = str(workdir_path)

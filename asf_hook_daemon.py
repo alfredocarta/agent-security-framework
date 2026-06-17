@@ -22,6 +22,7 @@ import stat as _stat
 import struct
 import threading
 import signal
+import re as _re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -76,8 +77,10 @@ def _read_runtime_pid() -> int:
         os.close(fd)
 
 import registry
-from interceptor import hardened_interceptor
+from interceptor import hardened_interceptor, make_session_id
 from claude_trace_store import get_default_store
+
+_TSID = _re.compile(r'^\d{8}_\d{6}_[0-9a-f]{6}$')
 
 try:
     registry.add_or_update_agent(
@@ -122,6 +125,8 @@ def handle_client(conn):
         tool_name = req.get("tool_name", asf_tool)
         tool_input = req.get("tool_input", text)
         session_id = req.get("session_id")
+        if not session_id or not _TSID.match(session_id):
+            session_id = make_session_id()
         transcript_path = req.get("transcript_path")
         tool_call_id = req.get("tool_call_id")
 

@@ -47,8 +47,8 @@ def test_claude_hook_enforce_denies_with_asf_suggestion(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert code == 2
-    assert "comando bloccato" in out
-    assert "asf_grep token secrets.txt" in out
+    assert "[ASF SECURITY BLOCK]" in out
+    assert "Tool blocked: Bash" in out
     assert "ASF_HOOK_MONITOR_ONLY=true" in out
 
 

@@ -195,6 +195,18 @@ _FEATURE_WEIGHTS = {
     "sensitive_file_abuse": 0.25, "zero_width": 1.0,
 }
 
+_L15_FEATURE_LABELS = {
+    "instruction_lang": "instruction-like language",
+    "structural": "injection structural markers",
+    "known_payloads": "known attack patterns",
+    "sensitive_file_abuse": "sensitive file access patterns",
+    "base64": "base64-encoded content",
+    "rot13": "obfuscated (ROT13) content",
+    "unicode": "unicode anomalies",
+    "zero_width": "zero-width characters",
+    "entropy": "high-entropy content",
+}
+
 
 def _strip_zero_width(text: str) -> tuple[str, bool]:
     """Strip only critical zero-width chars. Soft chars (ZWJ, ZWNJ, etc.) are left
@@ -599,8 +611,12 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
         hidden_score = _classifier_gate_score(combined_hidden)
         if hidden_score >= 0.2:
             _log_l15_start()
-            _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 hidden HTML content (score={hidden_score:.2f})")
-            return "DENY", f"BLOCKED by L1.5 hidden HTML content (score={hidden_score:.2f})", None
+            _HARDENING_AUDITOR.log_event(
+                agent_id, tool_name, "L1.5_BLOCK",
+                f"BLOCKED by L1.5 hidden HTML content (score={hidden_score:.0%})",
+                human_reason=f"Hidden HTML text was found in the tool input and scored {hidden_score:.0%} on the risk scale. This technique is often used to embed invisible instructions.",
+            )
+            return "DENY", f"BLOCKED by L1.5 hidden HTML content (score={hidden_score:.0%})", None
         print(
             f"[L1.5] Hidden HTML text found but score below threshold ({hidden_score:.2f}), continuing",
             file=sys.stderr
@@ -608,27 +624,51 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
         tool_input = _strip_hidden_html_text(tool_input)
 
     classifier_input = tool_input if not had_zero_width else original_input
-    should_block, score = classifier_gate(classifier_input)
-    if should_block:
-        print(f"[L1.5] Classifier gate blocked (score={score:.2f})", file=sys.stderr)
+    cl_result = classify_text(classifier_input)
+    if cl_result.blocked:
+        score = cl_result.score
+        print(f"[L1.5] Classifier gate blocked (score={score:.0%})", file=sys.stderr)
         _log_l15_start()
-        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})")
-        return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.2f})", None
+        triggered = [
+            _L15_FEATURE_LABELS.get(f, f)
+            for f, v in sorted(cl_result.features.items(), key=lambda x: x[1], reverse=True)
+            if v > 0.3 and f != "doc_context"
+        ]
+        human_reason = f"The quick-screening filter scored this input at {score:.0%} (block threshold exceeded)."
+        if triggered:
+            human_reason += f" Triggered signals: {', '.join(triggered[:3])}."
+        _HARDENING_AUDITOR.log_event(
+            agent_id, tool_name, "L1.5_BLOCK",
+            f"BLOCKED by L1.5 heuristic classifier (score={score:.0%})",
+            human_reason=human_reason,
+        )
+        return "DENY", f"BLOCKED by L1.5 heuristic classifier (score={score:.0%})", None
     _, decode_score = decode_and_rescan(tool_input)
     if decode_score >= 0.2:
         print("[L1.5] Decode-and-rescan detected encoded payload", file=sys.stderr)
         _log_l15_start()
-        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)")
+        _HARDENING_AUDITOR.log_event(
+            agent_id, tool_name, "L1.5_BLOCK",
+            "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)",
+            human_reason="The tool input contained encoded content (e.g. base64 or URL-encoded) that decoded into a suspicious payload — a common filter-bypass technique.",
+        )
         return "DENY", "BLOCKED by L1.5 decode-and-rescan (encoded payload detected)", None
     cross_score = _cross_field_classify(tool_input)
     if cross_score >= 0.5:
         print(f"[L1.5] Cross-field correlation detected (score={cross_score:.2f})", file=sys.stderr)
         _log_l15_start()
-        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 cross-field correlation (score={cross_score:.2f})")
+        _HARDENING_AUDITOR.log_event(
+            agent_id, tool_name, "L1.5_BLOCK",
+            f"BLOCKED by L1.5 cross-field correlation (score={cross_score:.0%})",
+            human_reason=f"Cross-field analysis detected correlated suspicious patterns across multiple input fields (score={cross_score:.0%}). This may indicate a coordinated injection attempt.",
+        )
         return "DENY", "BLOCKED by L1.5 cross-field correlation", None
     if interceptor_fn is None:
         _log_l15_start()
-        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "Authorized by L1.5 hardening checks.")
+        _HARDENING_AUDITOR.log_event(
+            agent_id, tool_name, "ALLOWED", "Authorized by L1.5 hardening checks.",
+            human_reason=f"All quick-screening checks passed (risk score: {cl_result.score:.0%}). No suspicious patterns were detected in the tool input.",
+        )
         return "ALLOW", "Authorized by L1.5 hardening checks.", None
     _, spotted_input = spotlight_message(tool_input)
     print("[L1.5] Spotlighting applied", file=sys.stderr)
@@ -638,6 +678,10 @@ def apply_l1_5_hardening(agent_id, tool_name, tool_input, interceptor_fn=None):
     if canary_verify(f"{verdict} {reason}", canary):
         print(f"[L1.5] Canary trap triggered: {canary}", file=sys.stderr)
         _log_l15_start()
-        _HARDENING_AUDITOR.log_event(agent_id, tool_name, "L1.5_BLOCK", f"BLOCKED by L1.5 canary trap (canary={canary})")
+        _HARDENING_AUDITOR.log_event(
+            agent_id, tool_name, "L1.5_BLOCK",
+            f"BLOCKED by L1.5 canary trap (canary={canary})",
+            human_reason="The canary token injected into the tool input was echoed back in the model output, indicating the model was manipulated by the input content.",
+        )
         return "DENY", f"BLOCKED by L1.5 canary trap (canary={canary})", canary
     return verdict, reason, canary
