@@ -10,12 +10,17 @@ pub async fn forward_to_python(
 ) -> Result<(String, String), String> {
     let asf_tool = asf_tool_name(&req.tool_name);
     let args_hash = crate::db::compute_args_hash(&req.tool_input);
-    let tool_call_id = crate::db::compute_tool_call_id(
+    let computed_tool_call_id = crate::db::compute_tool_call_id(
         &req.session_id,
         &req.transcript_path,
         &req.tool_name,
         &args_hash,
     );
+    let tool_call_id = req
+        .tool_use_id
+        .as_deref()
+        .map(|id| id.to_string())
+        .unwrap_or(computed_tool_call_id);
     let payload = json!({
         "tool": asf_tool,
         "input": extracted_text,

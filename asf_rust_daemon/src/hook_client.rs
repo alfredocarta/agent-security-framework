@@ -28,6 +28,7 @@ fn main() {
     let tool_input = payload["tool_input"].clone();
     let session_id = payload["session_id"].as_str().map(|s| s.to_string());
     let transcript_path = payload["transcript_path"].as_str().map(|s| s.to_string());
+    let tool_use_id = payload["tool_use_id"].as_str().map(|s| s.to_string());
 
     const SUPPORTED: &[&str] = &[
         "Bash",
@@ -56,6 +57,7 @@ fn main() {
         "tool_input": tool_input,
         "session_id": session_id,
         "transcript_path": transcript_path,
+        "tool_use_id": tool_use_id,
         "agent_id": "claude-code",
     });
 
@@ -87,8 +89,7 @@ fn main() {
 fn query_rust_daemon(request: &serde_json::Value) -> Result<(String, String), String> {
     let socket_path = cache_dir()?.join("asf_rust.sock");
 
-    let stream =
-        UnixStream::connect(&socket_path).map_err(|e| format!("connect failed: {e}"))?;
+    let stream = UnixStream::connect(&socket_path).map_err(|e| format!("connect failed: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;

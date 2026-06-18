@@ -6,6 +6,7 @@ pub struct CheckRequest {
     pub tool_input: serde_json::Value,
     pub session_id: Option<String>,
     pub transcript_path: Option<String>,
+    pub tool_use_id: Option<String>,
     pub agent_id: String,
 }
 
