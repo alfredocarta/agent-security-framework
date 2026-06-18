@@ -134,7 +134,12 @@ async fn prepare_socket(socket_path: &Path) -> io::Result<()> {
 async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line).await?;
+    let bytes_read = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reader.read_line(&mut line),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "client read timed out"))??;
 
     if bytes_read == 0 {
         return Ok(());
@@ -185,16 +190,15 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
                 let db_path = db::resolve_db_path();
                 let db_outcome_owned = db_outcome.to_string();
                 let final_reason_clone = final_reason.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Err(err) = db::write_deny_record(
-                        &db_path,
-                        &request,
-                        &final_reason_clone,
-                        &db_outcome_owned,
-                    ) {
-                        eprintln!("failed to write deny record to DB: {err}");
-                    }
-                });
+                if let Err(err) = tokio::task::spawn_blocking(move || {
+                    db::write_deny_record(&db_path, &request, &final_reason_clone, &db_outcome_owned)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()))
+                {
+                    log_line(log_path, "ERROR", &format!("failed to write deny record: {err}"));
+                }
             }
             CheckResponse {
                 verdict: final_verdict,

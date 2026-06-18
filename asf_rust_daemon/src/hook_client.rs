@@ -4,11 +4,20 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 fn main() {
-    let mut input = String::new();
-    {
+    const MAX_STDIN_BYTES: u64 = 256 * 1024;
+    let mut raw = Vec::new();
+    let bytes_read = {
         use std::io::Read;
-        std::io::stdin().read_to_string(&mut input).unwrap_or(0);
+        std::io::stdin()
+            .lock()
+            .take(MAX_STDIN_BYTES + 1)
+            .read_to_end(&mut raw)
+            .unwrap_or(0)
+    };
+    if bytes_read as u64 > MAX_STDIN_BYTES {
+        std::process::exit(0);
     }
+    let input = String::from_utf8_lossy(&raw);
 
     let payload: serde_json::Value = match serde_json::from_str(&input) {
         Ok(v) => v,
@@ -37,7 +46,7 @@ fn main() {
 
     let monitor_only = std::env::var("ASF_HOOK_MONITOR_ONLY")
         .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(false);
+        .unwrap_or(true);
     let fail_closed = std::env::var("ASF_HOOK_FAIL_CLOSED")
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);

@@ -84,6 +84,7 @@ pub fn write_deny_record(
         &args_hash,
     );
     let trace_id = compute_trace_id(&req.session_id, &tool_call_id, &req.tool_name, &args_hash);
+    let asf_tool = crate::forwarder::asf_tool_name(&req.tool_name);
 
     conn.execute("BEGIN IMMEDIATE", [])?;
 
@@ -134,7 +135,7 @@ pub fn write_deny_record(
             req.transcript_path,
             tool_call_id,
             req.tool_name,
-            req.tool_name,
+            asf_tool,
             args_hash,
             args_preview,
             outcome,

@@ -71,7 +71,7 @@ pub async fn forward_to_python(
     Ok((verdict.to_string(), reason.to_string()))
 }
 
-fn asf_tool_name(tool_name: &str) -> &'static str {
+pub(crate) fn asf_tool_name(tool_name: &str) -> &'static str {
     match tool_name {
         "Bash" => "shell",
         "Read" => "file_read",
