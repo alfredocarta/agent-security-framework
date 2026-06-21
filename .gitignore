@@ -1,5 +1,6 @@
 # databases
 *.db
+*.db.bak-*
 
 # compiled python
 __pycache__/
