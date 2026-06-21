@@ -57,6 +57,7 @@ SECRET_PATTERNS = (
 
 _TRACE_BY_CALL_KEY: dict[tuple[str, str, str], str] = {}
 _TRACE_LOCK = threading.Lock()
+DEFAULT_AGENT_ID = "hermes-live-agent"
 
 
 def env_bool(name: str, default: bool = False) -> bool:

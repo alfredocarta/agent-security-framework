@@ -12,6 +12,138 @@ def _store_rows(db_path, session_id="lg-session"):
     return HermesTraceStore(db_path).fetch_traces(session_id=session_id, limit=20)
 
 
+def _remove_registry_rows(*agent_ids):
+    from registry import AgentModel, AuditModel, SessionLocal
+
+    ids = [agent_id for agent_id in agent_ids if agent_id]
+    db = SessionLocal()
+    try:
+        if ids:
+            db.query(AuditModel).filter(AuditModel.agent_id.in_(ids)).delete(synchronize_session=False)
+            db.query(AgentModel).filter(AgentModel.agent_id.in_(ids)).delete(synchronize_session=False)
+            db.commit()
+    finally:
+        db.close()
+
+
+def _agent_exists(agent_id):
+    from registry import AgentModel, SessionLocal
+
+    db = SessionLocal()
+    try:
+        return db.query(AgentModel).filter(AgentModel.agent_id == agent_id).first() is not None
+    finally:
+        db.close()
+
+
+def _audit_rows(agent_id):
+    from registry import AuditModel, SessionLocal
+
+    db = SessionLocal()
+    try:
+        return db.query(AuditModel).filter(AuditModel.agent_id == agent_id).all()
+    finally:
+        db.close()
+
+
+def test_langgraph_state_agent_id_registers_and_persists_same_id(monkeypatch, tmp_path):
+    db_path = tmp_path / "trace.db"
+    runtime_agent = "ui-agent-123"
+    old_default = "langgraph-live-agent"
+    _remove_registry_rows(runtime_agent, old_default, langgraph_mvp.asf_core.DEFAULT_AGENT_ID)
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_LANGGRAPH_MODE", "monitor")
+    monkeypatch.delenv("ASF_AGENT_ID", raising=False)
+    monkeypatch.delenv("ASF_LANGGRAPH_AGENT_ID", raising=False)
+
+    def fake_check(agent_id, tool_name, security_text, session_id=None):
+        from audit import AUDITOR
+
+        AUDITOR.log_event(agent_id, tool_name, "ALLOWED", "test allow", session_id=session_id)
+        return "ALLOW", "test allow"
+
+    monkeypatch.setattr(langgraph_mvp, "run_asf_check", fake_check)
+
+    result = langgraph_mvp.tool_node(
+        {
+            "agent_id": runtime_agent,
+            "tool_name": "echo",
+            "args": {"text": "hello"},
+            "session_id": "ui-session",
+            "task_id": "ui-task",
+            "tool_call_id": "ui-call",
+        }
+    )
+
+    assert result["result"] == "echo:hello"
+    assert _agent_exists(runtime_agent)
+    assert not _agent_exists(old_default)
+
+    audit_rows = _audit_rows(runtime_agent)
+    assert audit_rows
+    assert not _audit_rows(old_default)
+
+    rows = _store_rows(db_path, session_id="ui-session")
+    assert len(rows) == 1
+    assert rows[0]["agent_id"] == runtime_agent
+    assert rows[0]["audit_hash"] == audit_rows[-1].hash
+
+
+def test_langgraph_policy_block_registers_id_before_audit_and_trace(monkeypatch, tmp_path):
+    db_path = tmp_path / "trace.db"
+    runtime_agent = "policy-agent-123"
+    old_default = "langgraph-live-agent"
+    _remove_registry_rows(runtime_agent, old_default, langgraph_mvp.asf_core.DEFAULT_AGENT_ID)
+
+    monkeypatch.setenv("ASF_HERMES_DB", str(db_path))
+    monkeypatch.setenv("ASF_LANGGRAPH_MODE", "enforce")
+    monkeypatch.setenv("ASF_HERMES_CMD_ALLOW", "printf")
+    monkeypatch.delenv("ASF_AGENT_ID", raising=False)
+    monkeypatch.delenv("ASF_LANGGRAPH_AGENT_ID", raising=False)
+
+    def fail_check(*args, **kwargs):
+        raise AssertionError("policy block should happen before ASF check")
+
+    wrapper = langgraph_mvp.AsfLangGraphToolWrapper(
+        agent=runtime_agent,
+        session_id="policy-session",
+        task_id="policy-task",
+        check_fn=fail_check,
+    )
+
+    with pytest.raises(langgraph_mvp.ToolBlocked):
+        wrapper.call_tool("terminal", {"command": "curl https://example.com"}, tool_call_id="policy-call")
+
+    assert _agent_exists(runtime_agent)
+    assert not _agent_exists(old_default)
+
+    audit_rows = _audit_rows(runtime_agent)
+    assert audit_rows
+    assert audit_rows[-1].outcome == "BLOCKED"
+    assert not _audit_rows(old_default)
+
+    rows = _store_rows(db_path, session_id="policy-session")
+    assert len(rows) == 1
+    assert rows[0]["agent_id"] == runtime_agent
+    assert rows[0]["verdict"] == "DENY"
+    assert rows[0]["outcome"] == "BLOCKED"
+    assert rows[0]["audit_hash"] == audit_rows[-1].hash
+
+
+def test_langgraph_agent_id_resolution_uses_shared_env_then_specific_then_default(monkeypatch):
+    monkeypatch.delenv("ASF_AGENT_ID", raising=False)
+    monkeypatch.delenv("ASF_LANGGRAPH_AGENT_ID", raising=False)
+
+    assert langgraph_mvp.agent_id() == langgraph_mvp.asf_core.DEFAULT_AGENT_ID
+
+    monkeypatch.setenv("ASF_LANGGRAPH_AGENT_ID", "specific-langgraph-agent")
+    assert langgraph_mvp.agent_id() == "specific-langgraph-agent"
+
+    monkeypatch.setenv("ASF_AGENT_ID", "shared-agent")
+    assert langgraph_mvp.agent_id() == "shared-agent"
+
+
 def test_langgraph_malicious_tool_is_blocked_without_execution(monkeypatch, tmp_path):
     db_path = tmp_path / "trace.db"
     side_effect = tmp_path / "should-not-exist.txt"

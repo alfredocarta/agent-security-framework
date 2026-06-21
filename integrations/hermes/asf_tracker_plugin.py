@@ -51,7 +51,7 @@ if not (DEFAULT_ASF_ROOT / "interceptor.py").exists():
 
 from wrapper import asf_core
 
-_AGENT_REGISTERED = False
+_REGISTERED_AGENT_IDS: set[str] = set()
 _TRACE_BY_CALL_KEY: dict[tuple[str, str, str], str] = {}
 _TRACE_LOCK = threading.Lock()
 _DISPATCH_WRAPPED = False
@@ -106,7 +106,7 @@ def _enabled() -> bool:
 
 
 def _agent_id() -> str:
-    return os.environ.get("ASF_HERMES_AGENT_ID", "hermes-live-agent")
+    return os.environ.get("ASF_AGENT_ID") or os.environ.get("ASF_HERMES_AGENT_ID") or asf_core.DEFAULT_AGENT_ID
 
 
 def _clean_str(value: Any) -> str | None:
@@ -309,9 +309,9 @@ def _all_permissions() -> list[str]:
 
 
 def register_hermes_agent() -> None:
-    global _AGENT_REGISTERED
     try:
         import registry
+        resolved_agent_id = _agent_id()
 
         # Reset mode (ASF_HERMES_REGISTRY_RESET=true) is an explicit opt-in for smoke
         # tests / scenario resets: it re-asserts permissions and clears any suspension
@@ -322,26 +322,27 @@ def register_hermes_agent() -> None:
         # silently defeat the kill-switch.
         if _env_bool("ASF_HERMES_REGISTRY_RESET", False):
             registry.add_or_update_agent(
-                _agent_id(),
+                resolved_agent_id,
                 risk_level=os.environ.get("ASF_HERMES_RISK_LEVEL", "high"),
                 permissions=_all_permissions(),
             )
             if hasattr(registry, "reinstate_agent"):
-                registry.reinstate_agent(_agent_id())
+                registry.reinstate_agent(resolved_agent_id)
+            _REGISTERED_AGENT_IDS.add(resolved_agent_id)
             return
 
-        if _AGENT_REGISTERED:
+        if resolved_agent_id in _REGISTERED_AGENT_IDS:
             return
         already_registered = (
-            registry.agent_exists(_agent_id()) if hasattr(registry, "agent_exists") else False
+            registry.agent_exists(resolved_agent_id) if hasattr(registry, "agent_exists") else False
         )
         if not already_registered:
             registry.add_or_update_agent(
-                _agent_id(),
+                resolved_agent_id,
                 risk_level=os.environ.get("ASF_HERMES_RISK_LEVEL", "high"),
                 permissions=_all_permissions(),
             )
-        _AGENT_REGISTERED = True
+        _REGISTERED_AGENT_IDS.add(resolved_agent_id)
     except Exception:
         if _env_bool("ASF_HERMES_FAIL_CLOSED", False):
             raise

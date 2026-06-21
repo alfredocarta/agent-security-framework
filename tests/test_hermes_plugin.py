@@ -556,7 +556,7 @@ def test_pre_hook_monitor_hitl_does_not_wait(monkeypatch, tmp_path):
 
 def test_pre_hook_enforce_real_asf_blocks_without_side_effect(monkeypatch, tmp_path):
     plugin = load_plugin_module()
-    plugin._AGENT_REGISTERED = False
+    plugin._REGISTERED_AGENT_IDS.clear()
 
     side_effect = tmp_path / "hermes-deny-side-effect.txt"
     monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
@@ -586,7 +586,7 @@ def test_pre_hook_enforce_real_asf_blocks_without_side_effect(monkeypatch, tmp_p
 
 def test_pre_hook_monitor_real_asf_does_not_block(monkeypatch, tmp_path):
     plugin = load_plugin_module()
-    plugin._AGENT_REGISTERED = False
+    plugin._REGISTERED_AGENT_IDS.clear()
 
     side_effect = tmp_path / "monitor-side-effect.txt"
     monkeypatch.setenv("ASF_HERMES_DB", str(tmp_path / "trace.db"))
@@ -720,23 +720,27 @@ class _FakeRegistry:
     def __init__(self, exists):
         self._exists = exists
         self.added = 0
+        self.added_ids = []
         self.reinstated = 0
+        self.reinstated_ids = []
 
     def agent_exists(self, agent_id):
         return self._exists
 
     def add_or_update_agent(self, agent_id, risk_level, permissions):
         self.added += 1
+        self.added_ids.append(agent_id)
 
     def reinstate_agent(self, agent_id):
         self.reinstated += 1
+        self.reinstated_ids.append(agent_id)
 
 
 def test_enforcement_does_not_reinstate_existing_agent(monkeypatch):
     import sys
 
     plugin = load_plugin_module()
-    plugin._AGENT_REGISTERED = False
+    plugin._REGISTERED_AGENT_IDS.clear()
     fake = _FakeRegistry(exists=True)
     monkeypatch.setitem(sys.modules, "registry", fake)
     monkeypatch.delenv("ASF_HERMES_REGISTRY_RESET", raising=False)
@@ -753,7 +757,7 @@ def test_enforcement_registers_missing_agent_once(monkeypatch):
     import sys
 
     plugin = load_plugin_module()
-    plugin._AGENT_REGISTERED = False
+    plugin._REGISTERED_AGENT_IDS.clear()
     fake = _FakeRegistry(exists=False)
     monkeypatch.setitem(sys.modules, "registry", fake)
     monkeypatch.delenv("ASF_HERMES_REGISTRY_RESET", raising=False)
@@ -766,11 +770,46 @@ def test_enforcement_registers_missing_agent_once(monkeypatch):
     assert fake.reinstated == 0
 
 
+def test_enforcement_registration_cache_is_per_agent_id(monkeypatch):
+    import sys
+
+    plugin = load_plugin_module()
+    plugin._REGISTERED_AGENT_IDS.clear()
+    fake = _FakeRegistry(exists=False)
+    monkeypatch.setitem(sys.modules, "registry", fake)
+    monkeypatch.delenv("ASF_AGENT_ID", raising=False)
+    monkeypatch.delenv("ASF_HERMES_REGISTRY_RESET", raising=False)
+
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-agent-one")
+    plugin.register_hermes_agent()
+    plugin.register_hermes_agent()
+
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "hermes-agent-two")
+    plugin.register_hermes_agent()
+
+    assert fake.added_ids == ["hermes-agent-one", "hermes-agent-two"]
+    assert plugin._REGISTERED_AGENT_IDS == {"hermes-agent-one", "hermes-agent-two"}
+
+
+def test_agent_id_resolution_uses_shared_env_then_specific_then_default(monkeypatch):
+    plugin = load_plugin_module()
+    monkeypatch.delenv("ASF_AGENT_ID", raising=False)
+    monkeypatch.delenv("ASF_HERMES_AGENT_ID", raising=False)
+
+    assert plugin._agent_id() == plugin.asf_core.DEFAULT_AGENT_ID
+
+    monkeypatch.setenv("ASF_HERMES_AGENT_ID", "specific-hermes-agent")
+    assert plugin._agent_id() == "specific-hermes-agent"
+
+    monkeypatch.setenv("ASF_AGENT_ID", "shared-agent")
+    assert plugin._agent_id() == "shared-agent"
+
+
 def test_reset_mode_reinstates_on_every_check(monkeypatch):
     import sys
 
     plugin = load_plugin_module()
-    plugin._AGENT_REGISTERED = False
+    plugin._REGISTERED_AGENT_IDS.clear()
     fake = _FakeRegistry(exists=True)
     monkeypatch.setitem(sys.modules, "registry", fake)
     monkeypatch.setenv("ASF_HERMES_REGISTRY_RESET", "true")

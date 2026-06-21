@@ -45,26 +45,27 @@ def mode() -> str:
 
 
 def agent_id() -> str:
-    return _env_value_any(("ASF_LANGGRAPH_AGENT_ID", "ASF_HERMES_AGENT_ID"), "langgraph-live-agent")
+    return _env_value_any(("ASF_AGENT_ID", "ASF_LANGGRAPH_AGENT_ID"), asf_core.DEFAULT_AGENT_ID)
 
 
-def register_langgraph_agent() -> None:
+def register_langgraph_agent(resolved_agent_id: str | None = None) -> None:
     try:
         import registry
 
+        resolved_agent_id = resolved_agent_id or agent_id()
         permissions = sorted(set(asf_core.DEFAULT_TOOL_MAP.values()) | {"shell", "code_execution", "communication"})
         if asf_core.env_bool("ASF_LANGGRAPH_REGISTRY_RESET", False):
             registry.add_or_update_agent(
-                agent_id(),
+                resolved_agent_id,
                 risk_level=os.environ.get("ASF_LANGGRAPH_RISK_LEVEL", "high"),
                 permissions=permissions,
             )
             if hasattr(registry, "reinstate_agent"):
-                registry.reinstate_agent(agent_id())
+                registry.reinstate_agent(resolved_agent_id)
             return
-        if not (registry.agent_exists(agent_id()) if hasattr(registry, "agent_exists") else False):
+        if not (registry.agent_exists(resolved_agent_id) if hasattr(registry, "agent_exists") else False):
             registry.add_or_update_agent(
-                agent_id(),
+                resolved_agent_id,
                 risk_level=os.environ.get("ASF_LANGGRAPH_RISK_LEVEL", "high"),
                 permissions=permissions,
             )
@@ -74,7 +75,7 @@ def register_langgraph_agent() -> None:
 
 
 def run_asf_check(agent: str, asf_tool: str, security_text: str, session_id: str | None = None) -> tuple[str, str]:
-    register_langgraph_agent()
+    register_langgraph_agent(agent)
     return asf_core.run_asf_check(agent, asf_tool, security_text, session_id=session_id)
 
 
@@ -132,6 +133,7 @@ class AsfLangGraphToolWrapper:
             session_id=self.session_id,
             fail_closed_env="ASF_LANGGRAPH_FAIL_CLOSED",
             check_fn=self.check_fn or (lambda agent, tool, text, sid: run_asf_check(agent, tool, text, session_id=sid)),
+            register_fn=lambda: register_langgraph_agent(self.agent),
         )
         asf_core.start_call_trace(
             agent_id=self.agent,
@@ -185,6 +187,7 @@ class AsfLangGraphToolWrapper:
             )
 
     def _persist_policy_block(self, tool_name: str, reason: str, args: dict[str, Any], tool_call_id: str | None) -> None:
+        register_langgraph_agent(self.agent)
         try:
             from audit import AUDITOR
 
