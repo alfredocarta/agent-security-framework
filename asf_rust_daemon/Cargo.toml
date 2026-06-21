@@ -14,6 +14,7 @@ path = "src/hook_client.rs"
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22"
+libc = "0.2"
 regex = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

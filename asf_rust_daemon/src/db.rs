@@ -77,12 +77,17 @@ pub fn write_deny_record(
 
     let stable_args = stable_json_value(&req.tool_input);
     let args_hash = sha256_hex(&stable_args);
-    let tool_call_id = compute_tool_call_id(
+    let computed_tool_call_id = compute_tool_call_id(
         &req.session_id,
         &req.transcript_path,
         &req.tool_name,
         &args_hash,
     );
+    let tool_call_id = req
+        .tool_use_id
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or(computed_tool_call_id);
     let trace_id = compute_trace_id(&req.session_id, &tool_call_id, &req.tool_name, &args_hash);
     let asf_tool = crate::forwarder::asf_tool_name(&req.tool_name);
 
@@ -169,7 +174,9 @@ fn stable_json_value(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
         Value::Bool(value) => value.to_string(),
-        Value::Number(_) | Value::String(_) => serde_json::to_string(v).unwrap(),
+        Value::Number(_) | Value::String(_) => {
+            serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())
+        }
         Value::Array(values) => {
             let items = values
                 .iter()
@@ -184,7 +191,8 @@ fn stable_json_value(v: &Value) -> String {
             let items = keys
                 .into_iter()
                 .map(|key| {
-                    let encoded_key = serde_json::to_string(key).unwrap();
+                    let encoded_key =
+                        serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
                     let value = stable_json_value(&values[key]);
                     format!("{encoded_key}: {value}")
                 })

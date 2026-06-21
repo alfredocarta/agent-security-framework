@@ -1,7 +1,13 @@
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::net::Shutdown;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn main() {
     const MAX_STDIN_BYTES: u64 = 256 * 1024;
@@ -75,21 +81,38 @@ fn main() {
             std::process::exit(0);
         }
         Err(err) => {
-            eprintln!("[ASF] rust daemon error: {err}");
             if fail_closed && !monitor_only {
                 print!("{}", block_message(&tool_name, "rust_daemon_unavailable"));
                 std::io::stdout().flush().ok();
                 std::process::exit(2);
             }
+            eprintln!("[ASF WARN] fail-open: rust daemon unreachable ({err})");
             std::process::exit(0);
         }
     }
 }
 
 fn query_rust_daemon(request: &serde_json::Value) -> Result<(String, String), String> {
-    let socket_path = cache_dir()?.join("asf_rust.sock");
+    let runtime_dir = cache_dir()?;
+    let socket_path = runtime_dir.join("asf_rust.sock");
+    ensure_rust_daemon(&runtime_dir, &socket_path)?;
 
-    let stream = UnixStream::connect(&socket_path).map_err(|e| format!("connect failed: {e}"))?;
+    match query_rust_daemon_once(&socket_path, request) {
+        Ok(response) => Ok(response),
+        Err(err) if is_connect_error(&err) => {
+            ensure_rust_daemon(&runtime_dir, &socket_path)?;
+            query_rust_daemon_once(&socket_path, request)
+                .map_err(|retry_err| format!("{err}; retry failed: {retry_err}"))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn query_rust_daemon_once(
+    socket_path: &PathBuf,
+    request: &serde_json::Value,
+) -> Result<(String, String), String> {
+    let stream = UnixStream::connect(socket_path).map_err(|e| format!("connect failed: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
@@ -127,6 +150,113 @@ fn query_rust_daemon(request: &serde_json::Value) -> Result<(String, String), St
         return Err(format!("unexpected verdict: {verdict}"));
     }
     Ok((verdict, reason))
+}
+
+fn ensure_rust_daemon(runtime_dir: &PathBuf, socket_path: &PathBuf) -> Result<(), String> {
+    fs::create_dir_all(runtime_dir)
+        .map_err(|err| format!("create runtime dir {}: {err}", runtime_dir.display()))?;
+
+    if socket_is_alive(socket_path) {
+        return Ok(());
+    }
+
+    let _lock = RuntimeLock::acquire(runtime_dir.join("asf_rust.lock"))?;
+    if socket_is_alive(socket_path) {
+        return Ok(());
+    }
+
+    if socket_path.exists() {
+        let _ = fs::remove_file(socket_path);
+    }
+
+    let daemon = daemon_program();
+    let mut command = Command::new(&daemon);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+        .spawn()
+        .map_err(|err| format!("start {} failed: {err}", daemon.display()))?;
+
+    let deadline = Instant::now() + startup_timeout();
+    while Instant::now() < deadline {
+        if socket_is_alive(socket_path) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(format!(
+        "rust daemon unreachable after restart at {}",
+        socket_path.display()
+    ))
+}
+
+fn socket_is_alive(socket_path: &PathBuf) -> bool {
+    match UnixStream::connect(socket_path) {
+        Ok(stream) => {
+            let _ = stream.shutdown(Shutdown::Both);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn daemon_program() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|dir| dir.join("asf-rust-daemon")))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from("asf-rust-daemon"))
+}
+
+fn startup_timeout() -> Duration {
+    let seconds = std::env::var("ASF_HOOK_STARTUP_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(10.0)
+        .clamp(1.0, 60.0);
+    Duration::from_secs_f64(seconds)
+}
+
+fn is_connect_error(err: &str) -> bool {
+    err.starts_with("connect failed:")
+}
+
+struct RuntimeLock {
+    file: File,
+}
+
+impl RuntimeLock {
+    fn acquire(path: PathBuf) -> Result<Self, String> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|err| format!("open lock {}: {err}", path.display()))?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(format!(
+                "lock {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for RuntimeLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 fn block_message(tool_name: &str, reason: &str) -> String {

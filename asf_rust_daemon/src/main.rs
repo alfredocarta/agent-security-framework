@@ -44,11 +44,7 @@ async fn main() -> io::Result<()> {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let log_path = config.log_path.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = handle_connection(stream, &log_path).await {
-                        log_line(&log_path, "ERROR", &format!("connection failed: {err}"));
-                    }
-                });
+                spawn_connection_task(stream, log_path);
             }
             Err(err) => {
                 log_line(&config.log_path, "ERROR", &format!("accept failed: {err}"));
@@ -131,6 +127,26 @@ async fn prepare_socket(socket_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn spawn_connection_task(stream: UnixStream, log_path: PathBuf) {
+    tokio::spawn(async move {
+        let task_log_path = log_path.clone();
+        let join =
+            tokio::spawn(async move { handle_connection(stream, &task_log_path).await }).await;
+        match join {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => log_line(&log_path, "ERROR", &format!("connection failed: {err}")),
+            Err(err) if err.is_panic() => {
+                log_line(&log_path, "ERROR", "connection task panicked");
+            }
+            Err(err) => log_line(
+                &log_path,
+                "ERROR",
+                &format!("connection task failed: {err}"),
+            ),
+        }
+    });
+}
+
 async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -188,16 +204,29 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
 
             if matches!(final_verdict, Verdict::Deny) {
                 let db_path = db::resolve_db_path();
-                let db_outcome_owned = db_outcome.to_string();
+                let db_outcome_owned = if db_outcome.is_empty() {
+                    "BLOCKED".to_string()
+                } else {
+                    db_outcome.to_string()
+                };
                 let final_reason_clone = final_reason.clone();
                 if let Err(err) = tokio::task::spawn_blocking(move || {
-                    db::write_deny_record(&db_path, &request, &final_reason_clone, &db_outcome_owned)
+                    db::write_deny_record(
+                        &db_path,
+                        &request,
+                        &final_reason_clone,
+                        &db_outcome_owned,
+                    )
                 })
                 .await
                 .map_err(|e| e.to_string())
                 .and_then(|r| r.map_err(|e| e.to_string()))
                 {
-                    log_line(log_path, "ERROR", &format!("failed to write deny record: {err}"));
+                    log_line(
+                        log_path,
+                        "ERROR",
+                        &format!("failed to write deny record: {err}"),
+                    );
                 }
             }
             CheckResponse {
