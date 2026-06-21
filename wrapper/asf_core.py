@@ -60,18 +60,51 @@ _TRACE_LOCK = threading.Lock()
 DEFAULT_AGENT_ID = "hermes-live-agent"
 _ENV_PRODUCTION = "production"
 _ENV_TEST = "test"
-_RAW_ASF_ENV = os.environ.get("ASF_ENV", _ENV_PRODUCTION).strip().lower()
+_ENV_STATE_FILE_ENV = "ASF_ENV_STATE_FILE"
+_ENV_STATE_FILE_NAME = "asf_env"
 
-if _RAW_ASF_ENV == _ENV_TEST:
-    _ASF_ENV = _ENV_TEST
-else:
-    if _RAW_ASF_ENV and _RAW_ASF_ENV != _ENV_PRODUCTION:
-        print(
-            f"[ASF WARN] Unknown ASF_ENV={_RAW_ASF_ENV!r}; using 'production'. "
-            "Valid values are 'production' and 'test'.",
-            file=sys.stderr,
-        )
-    _ASF_ENV = _ENV_PRODUCTION
+
+def asf_env_state_file() -> Path:
+    explicit = os.environ.get(_ENV_STATE_FILE_ENV)
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / ".cache" / "asf-hook" / _ENV_STATE_FILE_NAME
+
+
+def _normalize_asf_env(raw_value: str | None, source: str, *, invalid_default: str | None) -> str | None:
+    value = (raw_value or "").strip().lower()
+    if not value:
+        return None
+    if value in {_ENV_TEST, _ENV_PRODUCTION}:
+        return value
+    if invalid_default:
+        message = f"[ASF WARN] Unknown {source}={value!r}; using {invalid_default!r}."
+    else:
+        message = f"[ASF WARN] Unknown {source}={value!r}; ignoring."
+    print(message, file=sys.stderr)
+    return invalid_default
+
+
+def _read_asf_env_state() -> str | None:
+    state_file = asf_env_state_file()
+    try:
+        raw_value = state_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(f"[ASF WARN] Could not read {state_file}: {exc}; using 'production'.", file=sys.stderr)
+        return None
+    return _normalize_asf_env(raw_value, str(state_file), invalid_default=None)
+
+
+def _resolve_asf_env() -> str:
+    raw_env = os.environ.get("ASF_ENV")
+    if raw_env is not None:
+        return _normalize_asf_env(raw_env, "ASF_ENV", invalid_default=_ENV_PRODUCTION) or _ENV_PRODUCTION
+    return _read_asf_env_state() or _ENV_PRODUCTION
+
+
+_ASF_ENV = _resolve_asf_env()
 
 
 def asf_env() -> str:
@@ -112,11 +145,11 @@ def sqlite_path_from_url(database_url: str) -> Path | None:
 
 
 def effective_database_url(*, production_db_path: str | Path | None = None) -> str:
+    if is_test_env():
+        return sqlite_url_for_path(asf_test_db_path())
     explicit = os.environ.get("DATABASE_URL")
     if explicit:
         return explicit
-    if is_test_env():
-        return sqlite_url_for_path(asf_test_db_path())
     return sqlite_url_for_path(production_db_path or (asf_root() / "asf_local.db"))
 
 

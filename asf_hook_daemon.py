@@ -27,7 +27,7 @@ import re as _re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wrapper import asf_core
 
-RUNTIME_DIR = os.path.expanduser("~/.cache/asf-hook")
+RUNTIME_DIR = os.path.expanduser(os.environ.get("ASF_HOOK_RUNTIME_DIR", "~/.cache/asf-hook"))
 try:
     os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
     _fd = os.open(RUNTIME_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)

@@ -56,6 +56,10 @@ def _table_values(db_path: Path, sql: str) -> list[tuple]:
         return conn.execute(sql).fetchall()
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    return left.resolve() == right.resolve()
+
+
 def test_asf_env_test_routes_registry_audit_and_trace_to_test_db(monkeypatch, tmp_path):
     test_db = tmp_path / "asf_test.db"
     production_db = tmp_path / "asf_local.db"
@@ -122,11 +126,12 @@ def test_asf_env_test_routes_registry_audit_and_trace_to_test_db(monkeypatch, tm
     ) == [("test-claude-code-agent",)]
 
 
-def test_asf_env_test_respects_explicit_database_url_but_still_namespaces(monkeypatch, tmp_path):
+def test_asf_env_test_ignores_database_url_but_still_namespaces(monkeypatch, tmp_path):
     explicit_db = tmp_path / "explicit.db"
     test_db = tmp_path / "asf_test.db"
 
     monkeypatch.setenv("ASF_ENV", "test")
+    monkeypatch.setenv("ASF_ROOT", str(tmp_path))
     monkeypatch.setenv("ASF_TEST_DB", str(test_db))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{explicit_db}")
     monkeypatch.delenv("ASF_AGENT_ID", raising=False)
@@ -150,13 +155,183 @@ def test_asf_env_test_respects_explicit_database_url_but_still_namespaces(monkey
         )
         wrapper.call_tool("echo", {"text": "ok"}, tool_call_id="explicit-call")
 
-    assert explicit_db.exists()
-    assert not test_db.exists()
-    assert _table_values(explicit_db, "SELECT agent_id FROM agents") == [("test-explicit-agent",)]
+    assert test_db.exists()
+    assert not explicit_db.exists()
+    assert _table_values(test_db, "SELECT agent_id FROM agents") == [("test-explicit-agent",)]
     assert _table_values(
-        explicit_db,
+        test_db,
         "SELECT agent_id FROM hermes_tool_traces WHERE session_id = 'explicit-session'",
     ) == [("test-explicit-agent",)]
+
+
+def test_claude_trace_two_phase_test_mode_uses_same_db_without_client_env(monkeypatch, tmp_path):
+    test_db = tmp_path / "asf_test.db"
+    local_db = tmp_path / "asf_local.db"
+    state_file = tmp_path / "asf_env"
+    state_file.write_text("test\n", encoding="utf-8")
+
+    monkeypatch.setenv("ASF_ENV_STATE_FILE", str(state_file))
+    monkeypatch.setenv("ASF_ENV", "test")
+    monkeypatch.setenv("ASF_ROOT", str(tmp_path))
+    monkeypatch.setenv("ASF_TEST_DB", str(test_db))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{local_db}")
+    monkeypatch.delenv("ASF_HOOK_DB", raising=False)
+
+    payload = {
+        "session_id": "two-phase-session",
+        "tool_call_id": "toolu_two_phase_001",
+        "tool_name": "Bash",
+        "tool_input": {"command": "printf done"},
+        "tool_response": "done from client",
+    }
+
+    with fresh_runtime_modules():
+        claude_trace_store = importlib.import_module("claude_trace_store")
+        asf_core = importlib.import_module("wrapper.asf_core")
+
+        assert asf_core.asf_env() == "test"
+        assert _same_path(claude_trace_store.resolve_db_path(), test_db)
+
+        daemon_tool_call_id = claude_trace_store.make_tool_call_id(
+            payload,
+            payload["tool_name"],
+            payload["tool_input"],
+        )
+        assert daemon_tool_call_id == "toolu_two_phase_001"
+
+        claude_trace_store.get_default_store().start_trace(
+            session_id=payload["session_id"],
+            transcript_path=None,
+            tool_call_id=daemon_tool_call_id,
+            claude_tool_name=payload["tool_name"],
+            asf_tool_name="shell",
+            args=payload["tool_input"],
+            verdict="ALLOW",
+            outcome="ALLOWED",
+            reason="ok",
+        )
+
+    monkeypatch.delenv("ASF_ENV", raising=False)
+
+    with fresh_runtime_modules():
+        claude_trace_store = importlib.import_module("claude_trace_store")
+        asf_core = importlib.import_module("wrapper.asf_core")
+
+        assert asf_core.asf_env() == "test"
+        assert _same_path(claude_trace_store.resolve_db_path(), test_db)
+
+        client_tool_call_id = claude_trace_store.make_tool_call_id(
+            payload,
+            payload["tool_name"],
+            payload["tool_input"],
+        )
+        assert client_tool_call_id == daemon_tool_call_id
+        assert client_tool_call_id.startswith("toolu_")
+
+        updated = claude_trace_store.get_default_store().finish_trace(
+            result=payload["tool_response"],
+            tool_call_id=client_tool_call_id,
+            session_id=payload["session_id"],
+        )
+
+    assert updated == 1
+    assert not local_db.exists()
+    assert _table_values(
+        test_db,
+        "SELECT tool_call_id, session_id, output_preview FROM claude_tool_traces",
+    ) == [("toolu_two_phase_001", "two-phase-session", "done from client")]
+
+
+def test_asf_env_state_file_fallback_routes_claude_trace_to_test_db(monkeypatch, tmp_path):
+    test_db = tmp_path / "asf_test.db"
+    local_db = tmp_path / "asf_local.db"
+    state_file = tmp_path / "asf_env"
+    state_file.write_text("test\n", encoding="utf-8")
+
+    monkeypatch.delenv("ASF_ENV", raising=False)
+    monkeypatch.setenv("ASF_ENV_STATE_FILE", str(state_file))
+    monkeypatch.setenv("ASF_ROOT", str(tmp_path))
+    monkeypatch.setenv("ASF_TEST_DB", str(test_db))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{local_db}")
+    monkeypatch.delenv("ASF_HOOK_DB", raising=False)
+
+    with fresh_runtime_modules():
+        claude_trace_store = importlib.import_module("claude_trace_store")
+        asf_core = importlib.import_module("wrapper.asf_core")
+
+        assert asf_core.asf_env() == "test"
+        assert asf_core.effective_database_url(production_db_path=local_db) == f"sqlite:///{test_db}"
+        assert _same_path(claude_trace_store.resolve_db_path(), test_db)
+
+        claude_trace_store.get_default_store().start_trace(
+            session_id="state-session",
+            transcript_path=None,
+            tool_call_id="toolu_state_001",
+            claude_tool_name="Read",
+            asf_tool_name="file_read",
+            args={"file_path": "sample.txt"},
+            verdict="ALLOW",
+            outcome="ALLOWED",
+            reason="ok",
+        )
+
+    with fresh_runtime_modules():
+        claude_trace_store = importlib.import_module("claude_trace_store")
+        assert _same_path(claude_trace_store.resolve_db_path(), test_db)
+        updated = claude_trace_store.get_default_store().finish_trace(
+            result={"content": "file contents"},
+            tool_call_id="toolu_state_001",
+            session_id="state-session",
+        )
+
+    assert updated == 1
+    assert not local_db.exists()
+    assert _table_values(
+        test_db,
+        "SELECT output_preview FROM claude_tool_traces WHERE tool_call_id = 'toolu_state_001'",
+    ) == [("file contents",)]
+
+
+def test_claude_trace_test_mode_respects_hook_db_override(monkeypatch, tmp_path):
+    test_db = tmp_path / "asf_test.db"
+    hook_db = tmp_path / "hook_override.db"
+    local_db = tmp_path / "asf_local.db"
+
+    monkeypatch.setenv("ASF_ENV", "test")
+    monkeypatch.setenv("ASF_ROOT", str(tmp_path))
+    monkeypatch.setenv("ASF_TEST_DB", str(test_db))
+    monkeypatch.setenv("ASF_HOOK_DB", str(hook_db))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{local_db}")
+
+    with fresh_runtime_modules():
+        claude_trace_store = importlib.import_module("claude_trace_store")
+
+        assert _same_path(claude_trace_store.resolve_db_path(), hook_db)
+        claude_trace_store.get_default_store().start_trace(
+            session_id="override-session",
+            transcript_path=None,
+            tool_call_id="toolu_override_001",
+            claude_tool_name="Read",
+            asf_tool_name="file_read",
+            args={"file_path": "override.txt"},
+            verdict="ALLOW",
+            outcome="ALLOWED",
+            reason="ok",
+        )
+        updated = claude_trace_store.get_default_store().finish_trace(
+            result="override contents",
+            tool_call_id="toolu_override_001",
+            session_id="override-session",
+        )
+
+    assert updated == 1
+    assert hook_db.exists()
+    assert not test_db.exists()
+    assert not local_db.exists()
+    assert _table_values(
+        hook_db,
+        "SELECT output_preview FROM claude_tool_traces WHERE tool_call_id = 'toolu_override_001'",
+    ) == [("override contents",)]
 
 
 def test_asf_env_test_prefixes_hermes_agent_id_idempotently(monkeypatch):
@@ -181,12 +356,15 @@ def test_asf_env_test_prefixes_hermes_agent_id_idempotently(monkeypatch):
 
 
 def test_asf_env_unset_preserves_production_defaults(monkeypatch, tmp_path):
+    state_file = tmp_path / "missing_asf_env"
+    explicit_db = tmp_path / "explicit_production.db"
+    production_db = tmp_path / "asf_local.db"
+
     monkeypatch.delenv("ASF_ENV", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("ASF_AGENT_ID", raising=False)
     monkeypatch.delenv("ASF_LANGGRAPH_AGENT_ID", raising=False)
-
-    production_db = tmp_path / "asf_local.db"
+    monkeypatch.setenv("ASF_ENV_STATE_FILE", str(state_file))
 
     with fresh_runtime_modules():
         asf_core = importlib.import_module("wrapper.asf_core")
@@ -194,6 +372,8 @@ def test_asf_env_unset_preserves_production_defaults(monkeypatch, tmp_path):
 
         assert asf_core.asf_env() == "production"
         assert asf_core.effective_database_url(production_db_path=production_db) == f"sqlite:///{production_db}"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{explicit_db}")
+        assert asf_core.effective_database_url(production_db_path=production_db) == f"sqlite:///{explicit_db}"
         assert langgraph_mvp.agent_id() == asf_core.DEFAULT_AGENT_ID
 
         monkeypatch.setenv("ASF_LANGGRAPH_AGENT_ID", "specific-langgraph-agent")

@@ -43,7 +43,7 @@ def _norm_sid(sid):
         return sid
     return _make_session_id()
 
-RUNTIME_DIR     = os.path.expanduser("~/.cache/asf-hook")
+RUNTIME_DIR     = os.path.expanduser(os.environ.get("ASF_HOOK_RUNTIME_DIR", "~/.cache/asf-hook"))
 SOCKET_PATH     = os.path.join(RUNTIME_DIR, "asf_hook.sock")
 PID_FILE        = os.path.join(RUNTIME_DIR, "asf_hook.pid")
 LOCK_FILE       = os.path.join(RUNTIME_DIR, "asf_hook.lock")

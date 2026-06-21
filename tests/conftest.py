@@ -3,6 +3,16 @@ import tempfile
 
 os.environ["ASF_SKIP_LLM"] = "true"
 
+os.environ.setdefault("ASF_HOOK_RUNTIME_DIR", tempfile.mkdtemp(prefix="asf_hook_test_runtime_"))
+
+if "ASF_ENV_STATE_FILE" not in os.environ:
+    _ENV_STATE_FILE = os.path.join(tempfile.gettempdir(), "asf_test_suite_env")
+    try:
+        os.remove(_ENV_STATE_FILE)
+    except FileNotFoundError:
+        pass
+    os.environ["ASF_ENV_STATE_FILE"] = _ENV_STATE_FILE
+
 # Isolate the test suite from the production audit DB (asf_local.db). registry binds its
 # engine to DATABASE_URL at import time, so this MUST run before `import registry` below;
 # otherwise the suite writes scenario agents and audit events into the real DB and pollutes
