@@ -31,33 +31,16 @@ def _run_main(monkeypatch, hook, payload):
     return exc.value.code
 
 
-def test_claude_hook_enforce_denies_with_asf_suggestion(monkeypatch, capsys):
+def test_claude_hook_pretooluse_defers_enforcement_to_rust_hook(monkeypatch):
     hook = _load_hook(monkeypatch, monitor_only="false")
+    ensure_calls = []
+
+    # PreToolUse enforcement moved to asf-rust-hook; Python only warms its daemon.
+    monkeypatch.setattr(hook, "ensure_daemon", lambda: ensure_calls.append(True))
     monkeypatch.setattr(
         hook,
         "query_daemon",
-        lambda asf_tool, text, metadata=None: {"verdict": "DENY", "reason": "policy denied"},
-    )
-
-    code = _run_main(
-        monkeypatch,
-        hook,
-        {"tool_name": "Bash", "tool_input": {"command": "grep token secrets.txt"}, "session_id": "s1"},
-    )
-
-    out = capsys.readouterr().out
-    assert code == 2
-    assert "[ASF SECURITY BLOCK]" in out
-    assert "Tool blocked: Bash" in out
-    assert "ASF_HOOK_MONITOR_ONLY=true" in out
-
-
-def test_claude_hook_allows_allow_verdict(monkeypatch):
-    hook = _load_hook(monkeypatch, monitor_only="false")
-    monkeypatch.setattr(
-        hook,
-        "query_daemon",
-        lambda asf_tool, text, metadata=None: {"verdict": "ALLOW", "reason": "ok"},
+        lambda *args, **kwargs: pytest.fail("PreToolUse should not query the Python daemon"),
     )
 
     code = _run_main(
@@ -67,43 +50,7 @@ def test_claude_hook_allows_allow_verdict(monkeypatch):
     )
 
     assert code == 0
-
-
-def test_claude_hook_monitor_only_does_not_block(monkeypatch, capsys):
-    hook = _load_hook(monkeypatch, monitor_only="true")
-    monkeypatch.setattr(
-        hook,
-        "query_daemon",
-        lambda asf_tool, text, metadata=None: {"verdict": "DENY", "reason": "policy denied"},
-    )
-
-    code = _run_main(
-        monkeypatch,
-        hook,
-        {"tool_name": "Bash", "tool_input": {"command": "python build.py"}, "session_id": "s1"},
-    )
-
-    assert code == 0
-    assert "would block" in capsys.readouterr().err
-
-
-def test_claude_hook_fail_open_on_daemon_error(monkeypatch, capsys):
-    hook = _load_hook(monkeypatch, monitor_only="false", fail_closed="false")
-    monkeypatch.setattr(hook, "RETRIES", 0)
-
-    def _raise(*args, **kwargs):
-        raise RuntimeError("daemon down")
-
-    monkeypatch.setattr(hook, "query_daemon", _raise)
-
-    code = _run_main(
-        monkeypatch,
-        hook,
-        {"tool_name": "Bash", "tool_input": {"command": "python build.py"}, "session_id": "s1"},
-    )
-
-    assert code == 0
-    assert "fail-open" in capsys.readouterr().err
+    assert ensure_calls == [True]
 
 
 def test_claude_daemon_persists_pretool_input(tmp_path, monkeypatch):
