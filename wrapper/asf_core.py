@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,91 @@ SECRET_PATTERNS = (
 _TRACE_BY_CALL_KEY: dict[tuple[str, str, str], str] = {}
 _TRACE_LOCK = threading.Lock()
 DEFAULT_AGENT_ID = "hermes-live-agent"
+_ENV_PRODUCTION = "production"
+_ENV_TEST = "test"
+_RAW_ASF_ENV = os.environ.get("ASF_ENV", _ENV_PRODUCTION).strip().lower()
+
+if _RAW_ASF_ENV == _ENV_TEST:
+    _ASF_ENV = _ENV_TEST
+else:
+    if _RAW_ASF_ENV and _RAW_ASF_ENV != _ENV_PRODUCTION:
+        print(
+            f"[ASF WARN] Unknown ASF_ENV={_RAW_ASF_ENV!r}; using 'production'. "
+            "Valid values are 'production' and 'test'.",
+            file=sys.stderr,
+        )
+    _ASF_ENV = _ENV_PRODUCTION
+
+
+def asf_env() -> str:
+    return _ASF_ENV
+
+
+def is_test_env() -> bool:
+    return _ASF_ENV == _ENV_TEST
+
+
+def asf_root() -> Path:
+    env_root = os.environ.get("ASF_ROOT")
+    if env_root:
+        return Path(env_root).expanduser()
+    return Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def asf_test_db_path() -> Path:
+    explicit = os.environ.get("ASF_TEST_DB")
+    if explicit:
+        return Path(explicit).expanduser()
+    return asf_root() / "asf_test.db"
+
+
+def sqlite_url_for_path(path: str | Path) -> str:
+    return f"sqlite:///{Path(path)}"
+
+
+def sqlite_path_from_url(database_url: str) -> Path | None:
+    if not database_url.startswith("sqlite"):
+        return None
+    parsed = urlparse(database_url)
+    if parsed.scheme not in {"sqlite", "sqlite3"}:
+        return None
+    if parsed.path in {"", "/:memory:"}:
+        return None
+    return Path(unquote(parsed.path))
+
+
+def effective_database_url(*, production_db_path: str | Path | None = None) -> str:
+    explicit = os.environ.get("DATABASE_URL")
+    if explicit:
+        return explicit
+    if is_test_env():
+        return sqlite_url_for_path(asf_test_db_path())
+    return sqlite_url_for_path(production_db_path or (asf_root() / "asf_local.db"))
+
+
+def effective_sqlite_db_path(
+    *,
+    explicit_path_env: str | None = None,
+    production_db_path: str | Path | None = None,
+) -> Path:
+    if explicit_path_env:
+        explicit = os.environ.get(explicit_path_env)
+        if explicit:
+            return Path(explicit).expanduser()
+
+    parsed = sqlite_path_from_url(effective_database_url(production_db_path=production_db_path))
+    if parsed is not None:
+        return parsed
+
+    if is_test_env():
+        return asf_test_db_path()
+    return Path(production_db_path or (asf_root() / "asf_local.db"))
+
+
+def namespace_agent_id(agent_id: str) -> str:
+    if not is_test_env():
+        return agent_id
+    return agent_id if agent_id.startswith("test-") else f"test-{agent_id}"
 
 
 def env_bool(name: str, default: bool = False) -> bool:

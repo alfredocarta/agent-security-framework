@@ -45,14 +45,16 @@ def mode() -> str:
 
 
 def agent_id() -> str:
-    return _env_value_any(("ASF_AGENT_ID", "ASF_LANGGRAPH_AGENT_ID"), asf_core.DEFAULT_AGENT_ID)
+    return asf_core.namespace_agent_id(
+        _env_value_any(("ASF_AGENT_ID", "ASF_LANGGRAPH_AGENT_ID"), asf_core.DEFAULT_AGENT_ID)
+    )
 
 
 def register_langgraph_agent(resolved_agent_id: str | None = None) -> None:
     try:
         import registry
 
-        resolved_agent_id = resolved_agent_id or agent_id()
+        resolved_agent_id = asf_core.namespace_agent_id(resolved_agent_id or agent_id())
         permissions = sorted(set(asf_core.DEFAULT_TOOL_MAP.values()) | {"shell", "code_execution", "communication"})
         if asf_core.env_bool("ASF_LANGGRAPH_REGISTRY_RESET", False):
             registry.add_or_update_agent(
@@ -75,6 +77,7 @@ def register_langgraph_agent(resolved_agent_id: str | None = None) -> None:
 
 
 def run_asf_check(agent: str, asf_tool: str, security_text: str, session_id: str | None = None) -> tuple[str, str]:
+    agent = asf_core.namespace_agent_id(agent)
     register_langgraph_agent(agent)
     return asf_core.run_asf_check(agent, asf_tool, security_text, session_id=session_id)
 
@@ -107,7 +110,7 @@ class AsfLangGraphToolWrapper:
         check_fn: Callable[[str, str, str, str | None], tuple[str, str]] | None = None,
     ):
         self.tools = tools or default_tools()
-        self.agent = agent or agent_id()
+        self.agent = asf_core.namespace_agent_id(agent or agent_id())
         self.session_id = session_id
         self.task_id = task_id
         self.check_fn = check_fn

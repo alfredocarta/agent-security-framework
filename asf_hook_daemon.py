@@ -25,6 +25,7 @@ import signal
 import re as _re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from wrapper import asf_core
 
 RUNTIME_DIR = os.path.expanduser("~/.cache/asf-hook")
 try:
@@ -42,7 +43,7 @@ except Exception as _e:
     sys.exit(1)
 SOCKET_PATH = os.path.join(RUNTIME_DIR, "asf_hook.sock")
 PID_FILE    = os.path.join(RUNTIME_DIR, "asf_hook.pid")
-AGENT_ID    = "claude-code-agent"
+AGENT_ID    = asf_core.namespace_agent_id("claude-code-agent")
 
 MAX_REQUEST_BYTES  = 64 * 1024
 MAX_CLIENT_THREADS = 32

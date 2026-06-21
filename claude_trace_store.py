@@ -10,13 +10,13 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 from trace_output_preview import output_preview_text as _shared_output_preview_text
+from wrapper import asf_core
 
 
 DEFAULT_MAX_PREVIEW_BYTES = int(os.environ.get("ASF_HOOK_MAX_PREVIEW_BYTES", "8192"))
-AGENT_ID = "claude-code-agent"
+AGENT_ID = asf_core.namespace_agent_id("claude-code-agent")
 DEFAULT_AGENT_MODEL = os.environ.get("ASF_CLAUDE_AGENT_MODEL", "claude-sonnet-4-6 via Claude Code")
 
 SECRET_PATTERNS = (
@@ -113,28 +113,12 @@ def output_preview_text(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) 
     return _shared_output_preview_text(value, max_bytes)
 
 
-def _sqlite_path_from_url(database_url: str) -> Path | None:
-    if not database_url.startswith("sqlite"):
-        return None
-    parsed = urlparse(database_url)
-    if parsed.scheme not in {"sqlite", "sqlite3"}:
-        return None
-    if parsed.path in {"", "/:memory:"}:
-        return None
-    return Path(unquote(parsed.path))
-
-
 def resolve_db_path() -> Path:
-    explicit = os.environ.get("ASF_HOOK_DB")
-    if explicit:
-        return Path(explicit).expanduser()
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url:
-        parsed = _sqlite_path_from_url(database_url)
-        if parsed is not None:
-            return parsed
     asf_root = Path(os.environ.get("ASF_ROOT", Path(__file__).resolve().parent))
-    return asf_root / "asf_local.db"
+    return asf_core.effective_sqlite_db_path(
+        explicit_path_env="ASF_HOOK_DB",
+        production_db_path=asf_root / "asf_local.db",
+    )
 
 
 def make_tool_call_id(payload: dict[str, Any], tool_name: str, tool_input: Any) -> str:

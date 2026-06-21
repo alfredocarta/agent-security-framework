@@ -5,9 +5,12 @@ from sqlalchemy import create_engine, Column, String, JSON, DateTime, Text, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+from wrapper import asf_core
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{os.path.join(BASE_DIR, 'asf_local.db')}")
+DATABASE_URL = asf_core.effective_database_url(
+    production_db_path=os.path.join(BASE_DIR, "asf_local.db")
+)
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

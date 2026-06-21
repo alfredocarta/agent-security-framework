@@ -106,7 +106,9 @@ def _enabled() -> bool:
 
 
 def _agent_id() -> str:
-    return os.environ.get("ASF_AGENT_ID") or os.environ.get("ASF_HERMES_AGENT_ID") or asf_core.DEFAULT_AGENT_ID
+    return asf_core.namespace_agent_id(
+        os.environ.get("ASF_AGENT_ID") or os.environ.get("ASF_HERMES_AGENT_ID") or asf_core.DEFAULT_AGENT_ID
+    )
 
 
 def _clean_str(value: Any) -> str | None:
@@ -349,6 +351,7 @@ def register_hermes_agent() -> None:
 
 
 def run_asf_check(agent_id: str, tool_name: str, security_text: str, session_id: str | None = None) -> tuple[str, str]:
+    agent_id = asf_core.namespace_agent_id(agent_id)
     register_hermes_agent()
     return asf_core.run_asf_check(agent_id, tool_name, security_text, session_id=session_id)
 

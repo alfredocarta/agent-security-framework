@@ -16,6 +16,10 @@ pub fn resolve_db_path() -> PathBuf {
         }
     }
 
+    if is_test_env() {
+        return test_db_path();
+    }
+
     if let Some(root) = env::var_os("ASF_ROOT") {
         return PathBuf::from(root).join("asf_local.db");
     }
@@ -25,6 +29,34 @@ pub fn resolve_db_path() -> PathBuf {
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("asf_local.db")
+}
+
+fn is_test_env() -> bool {
+    env::var("ASF_ENV")
+        .map(|value| value.trim().eq_ignore_ascii_case("test"))
+        .unwrap_or(false)
+}
+
+fn test_db_path() -> PathBuf {
+    if let Some(path) = env::var_os("ASF_TEST_DB") {
+        return PathBuf::from(path);
+    }
+    if let Some(root) = env::var_os("ASF_ROOT") {
+        return PathBuf::from(root).join("asf_test.db");
+    }
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("asf_test.db")
+}
+
+fn namespaced_agent_id(agent_id: &str) -> String {
+    if is_test_env() && !agent_id.starts_with("test-") {
+        format!("test-{agent_id}")
+    } else {
+        agent_id.to_string()
+    }
 }
 
 pub fn write_deny_record(
@@ -101,7 +133,7 @@ pub fn write_deny_record(
         )
         .unwrap_or_else(|_| "0".repeat(64));
 
-    let agent_id = "claude-code-agent";
+    let agent_id = namespaced_agent_id("claude-code-agent");
     let action = &req.tool_name;
     let audit_data = format!("{}{}{}{}{}", agent_id, action, outcome, reason, prev_hash);
     let audit_hash = sha256_hex(audit_data.as_bytes());
@@ -118,7 +150,16 @@ pub fn write_deny_record(
         VALUES
             (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)
         ",
-        params![audit_hash, now, agent_id, action, outcome, reason, prev_hash, trace_id,],
+        params![
+            audit_hash,
+            now,
+            agent_id.as_str(),
+            action,
+            outcome,
+            reason,
+            prev_hash,
+            trace_id,
+        ],
     )?;
 
     conn.execute(
@@ -134,7 +175,7 @@ pub fn write_deny_record(
         params![
             row_id,
             now,
-            agent_id,
+            agent_id.as_str(),
             agent_model,
             req.session_id,
             req.transcript_path,
