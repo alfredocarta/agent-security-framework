@@ -32,6 +32,17 @@ if ! "$PIP" install -r "$SCRIPT_DIR/requirements.txt"; then
   exit 1
 fi
 
+ASE_DIR="$(dirname "$SCRIPT_DIR")/agent-security-evaluation"
+if [ ! -d "$ASE_DIR/dashboard_v2" ]; then
+  echo "Cloning agent-security-evaluation..."
+  if ! git clone https://github.com/alfredocarta/agent-security-evaluation.git "$ASE_DIR"; then
+    echo "Error: failed to clone agent-security-evaluation."
+    exit 1
+  fi
+else
+  echo "agent-security-evaluation already present, skipping clone."
+fi
+
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 ln -sf "$SCRIPT_DIR/asf_rust_daemon/target/release/asf-run" "$BIN_DIR/asf-run"
@@ -54,7 +65,7 @@ ASF installato.
 Comandi disponibili:
   asf-run claude      — avvia Claude Code con ASF attivo
   asf-run hermes      — avvia Hermes con ASF attivo
-  asf-run dashboard   — avvia la dashboard di audit
+  asf-run dashboard   — avvia la dashboard (http://localhost:8080/overview)
   asf-run update      — mostra istruzioni per aggiornare
 
 Gli hook di Claude Code vengono configurati automaticamente al primo avvio.
