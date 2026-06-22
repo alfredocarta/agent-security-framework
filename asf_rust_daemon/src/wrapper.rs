@@ -31,6 +31,21 @@ fn main() {
 
     if args.get(1).map(String::as_str) == Some("dashboard") {
         let asf_root = resolve_asf_root();
+        let dashboard_dir = std::env::var("ASF_DASHBOARD_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                asf_root
+                    .parent()
+                    .map(|parent| parent.join("agent-security-evaluation").join("dashboard_v2"))
+                    .unwrap_or_else(|| PathBuf::from("agent-security-evaluation").join("dashboard_v2"))
+            });
+
+        if !dashboard_dir.is_dir() {
+            eprintln!("[asf-run] dashboard non trovata: {}", dashboard_dir.display());
+            eprintln!("[asf-run] imposta ASF_DASHBOARD_DIR per specificare la directory di dashboard_v2");
+            std::process::exit(1);
+        }
+
         let python = resolve_python().unwrap_or_else(|e| {
             eprintln!("[asf-run] {e}");
             std::process::exit(1);
@@ -58,24 +73,15 @@ fn main() {
                         std::process::exit(1);
                     })
                 })
-                .unwrap_or(8000u16),
+                .unwrap_or(8080u16),
         };
 
-        eprintln!("[asf-run] avvio dashboard — http://localhost:{port}/audit");
-        eprintln!("[asf-run] credenziali default: admin / asf-secret-2024");
-        eprintln!("[asf-run] imposta ASF_DASHBOARD_PASSWORD per cambiare la password");
+        eprintln!("[asf-run] avvio dashboard — http://localhost:{port}/overview");
+        eprintln!("[asf-run] directory: {}", dashboard_dir.display());
 
         let err = Command::new(python)
-            .args([
-                "-m",
-                "uvicorn",
-                "server:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-            ])
-            .current_dir(&asf_root)
+            .args(["-m", "backend.main"])
+            .current_dir(&dashboard_dir)
             .env("ASF_ROOT", asf_root.display().to_string())
             .exec();
 
