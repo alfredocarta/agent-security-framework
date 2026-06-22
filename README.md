@@ -72,6 +72,32 @@
 
 ---
 
+## Security Guarantees and Limitations
+
+ASF enforces the following controls on a local machine:
+
+- All agent tool calls pass through Stage 1 (Rust) and L1.5 (Rust) analysis before execution.
+- The pipeline applies Stage 2.5 anomaly detection, Stage 3 output inspection, and an output
+  guard.
+- Every call is logged to a local SQLite audit database with session and agent identifiers.
+- Hook enforcement prevents Claude Code and Hermes from operating without the daemon running.
+
+ASF does not guarantee the following:
+
+- ASF cannot protect itself from a user or attacker with physical or administrative access
+  to the machine. Hooks, binaries, and configuration can be bypassed by the local user.
+- ASF does not prevent a compromised LLM provider or network-level attacker from injecting
+  content before it reaches the pipeline.
+- ASF does not provide multi-tenant isolation, fleet-level enforcement, or remote policy
+  management.
+    All enforcement is local to the machine where the daemon runs.
+- ASF is a research prototype. It has not undergone independent security audit.
+
+These limitations are intentional design boundaries for the current version, not defects.
+Server-side enforcement, remote policy management, and fleet management are future work.
+
+---
+
 ## Architecture
 
 ### Stage 1 - Regex kill-switches
