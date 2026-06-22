@@ -11,6 +11,24 @@ use std::process::Command;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.get(1).map(String::as_str) == Some("update") {
+        let current_exe = std::env::current_exe().unwrap_or_else(|e| {
+            eprintln!("[asf-run] impossibile determinare il binario corrente: {e}");
+            std::process::exit(1);
+        });
+        let asf_root = resolve_asf_root();
+
+        println!("asf-run versione {}", env!("CARGO_PKG_VERSION"));
+        println!("binario:  {}", current_exe.display());
+        println!("asf root: {}", asf_root.display());
+        println!();
+        println!("Per aggiornare:");
+        println!("  cd {}", asf_root.display());
+        println!("  git pull");
+        println!("  cd asf_rust_daemon && cargo build --release");
+        std::process::exit(0);
+    }
+
     let agent_name = match args.get(1) {
         Some(n) => n.clone(),
         None => {
