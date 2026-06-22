@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Make executable after checkout if needed: chmod +x install.sh
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "Error: Rust is not installed. Install it from https://rustup.rs and re-run install.sh."
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+  echo "Error: Python 3 is required. Install it and re-run install.sh."
+  exit 1
+fi
+
+if ! (cd "$SCRIPT_DIR/asf_rust_daemon" && cargo build --release); then
+  exit 1
+fi
+
+if [ -n "$CONDA_PREFIX" ]; then
+  PIP="$CONDA_PREFIX/bin/pip"
+elif command -v pip3 >/dev/null 2>&1; then
+  PIP="pip3"
+elif command -v pip >/dev/null 2>&1; then
+  PIP="pip"
+else
+  echo "Error: pip is required. Install it and re-run install.sh."
+  exit 1
+fi
+
+if ! "$PIP" install -r "$SCRIPT_DIR/requirements.txt"; then
+  exit 1
+fi
+
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$BIN_DIR"
+ln -sf "$SCRIPT_DIR/asf_rust_daemon/target/release/asf-run" "$BIN_DIR/asf-run"
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *)
+    cat <<'EOF'
+Warning: ~/.local/bin is not in your PATH.
+Add this line to your shell profile (~/.bashrc, ~/.zshrc, etc.):
+  export PATH="$HOME/.local/bin:$PATH"
+Then restart your terminal or run: source ~/.zshrc
+EOF
+    ;;
+esac
+
+cat <<'EOF'
+ASF installato.
+
+Comandi disponibili:
+  asf-run claude      — avvia Claude Code con ASF attivo
+  asf-run hermes      — avvia Hermes con ASF attivo
+  asf-run dashboard   — avvia la dashboard di audit
+  asf-run update      — mostra istruzioni per aggiornare
+
+Gli hook di Claude Code vengono configurati automaticamente al primo avvio.
+EOF

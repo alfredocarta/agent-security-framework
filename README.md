@@ -160,20 +160,38 @@ Detection patterns are stored in a dedicated SQLite policies table with a conten
 
 ---
 
-## Quick start
+## Getting Started
+
+**Prerequisites:** Rust (https://rustup.rs) and Python 3.
 
 ```bash
-# Run migration (populates DB from policies.yaml - first time only)
-python migrate_policies.py
+git clone <repo-url>
+cd agent-security-framework
+./install.sh
+```
 
-# Run the standard demo
-python demo.py
+`install.sh` builds the Rust daemon, installs Python dependencies, and creates an `asf-run` symlink in `~/.local/bin`. It is idempotent and does not require sudo.
 
-# Run the Human-in-the-Loop demo
-python demo_hitl.py
+If `~/.local/bin` is not in your PATH, the script will print the line to add to your shell profile.
 
-# Run the full test suite
-python -m pytest tests/ -v
+Once installed:
+
+```bash
+asf-run claude        # launch Claude Code with ASF active
+asf-run hermes        # launch Hermes with ASF active
+asf-run dashboard     # start the audit dashboard (http://localhost:8000/audit)
+asf-run update        # show version and update instructions
+```
+
+Dashboard default credentials: `admin` / `asf-secret-2024`. Set `ASF_DASHBOARD_PASSWORD` to change the password.
+
+**Development commands** (no wrapper required):
+
+```bash
+python migrate_policies.py   # populate DB from policies.yaml (first time only)
+python demo.py               # standard end-to-end demo
+python demo_hitl.py          # HITL demo with human approval flow
+python -m pytest tests/ -v   # full test suite
 ```
 
 ---

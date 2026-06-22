@@ -29,10 +29,64 @@ fn main() {
         std::process::exit(0);
     }
 
+    if args.get(1).map(String::as_str) == Some("dashboard") {
+        let asf_root = resolve_asf_root();
+        let python = resolve_python().unwrap_or_else(|e| {
+            eprintln!("[asf-run] {e}");
+            std::process::exit(1);
+        });
+
+        let mut port_arg = None;
+        let mut iter = args[2..].iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--port" {
+                port_arg = iter.next();
+                break;
+            }
+        }
+
+        let port = match port_arg {
+            Some(value) => value.parse::<u16>().unwrap_or_else(|_| {
+                eprintln!("[asf-run] --port richiede un numero valido");
+                std::process::exit(1);
+            }),
+            None => std::env::var("ASF_DASHBOARD_PORT")
+                .ok()
+                .map(|value| {
+                    value.parse::<u16>().unwrap_or_else(|_| {
+                        eprintln!("[asf-run] --port richiede un numero valido");
+                        std::process::exit(1);
+                    })
+                })
+                .unwrap_or(8000u16),
+        };
+
+        eprintln!("[asf-run] avvio dashboard — http://localhost:{port}/audit");
+        eprintln!("[asf-run] credenziali default: admin / asf-secret-2024");
+        eprintln!("[asf-run] imposta ASF_DASHBOARD_PASSWORD per cambiare la password");
+
+        let err = Command::new(python)
+            .args([
+                "-m",
+                "uvicorn",
+                "server:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+            ])
+            .current_dir(&asf_root)
+            .env("ASF_ROOT", asf_root.display().to_string())
+            .exec();
+
+        eprintln!("[asf-run] exec fallito: {err}");
+        std::process::exit(1);
+    }
+
     let agent_name = match args.get(1) {
         Some(n) => n.clone(),
         None => {
-            eprintln!("uso: asf-run <claude|hermes> [args...]");
+            eprintln!("uso: asf-run <claude|hermes|dashboard> [args...]");
             std::process::exit(1);
         }
     };
@@ -84,6 +138,22 @@ fn resolve_asf_root() -> PathBuf {
             eprintln!("[asf-run] impossibile determinare ASF_ROOT dall'eseguibile");
             std::process::exit(1);
         })
+}
+
+fn resolve_python() -> Result<String, String> {
+    if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
+        let p = PathBuf::from(prefix).join("bin/python");
+        if p.exists() { return Ok(p.display().to_string()); }
+    }
+    for candidate in &["python3", "python"] {
+        if let Ok(out) = Command::new("which").arg(candidate).output() {
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() { return Ok(path); }
+            }
+        }
+    }
+    Err("nessun interprete Python trovato (CONDA_PREFIX, python3, python)".to_string())
 }
 
 fn default_runtime_dir() -> PathBuf {
