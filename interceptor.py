@@ -783,9 +783,23 @@ def hardened_interceptor(agent_id, tool_name, tool_input, session_id=None):
             probe_fired=probe_fired,
         )
 
-    return apply_l1_5_hardening(
+    result = apply_l1_5_hardening(
         agent_id,
         tool_name,
         tool_input,
         _interceptor,
     )
+
+    reason = result[1] if len(result) > 1 else ""
+    confidence = None
+    try:
+        reason_text = str(reason)
+        confidence_match = re.search(r"p=(\d+\.\d+)", reason_text)
+        if confidence_match is None:
+            confidence_match = re.search(r"confidence[:\s]+(\d+\.\d+)", reason_text, re.IGNORECASE)
+        if confidence_match is not None:
+            confidence = float(confidence_match.group(1))
+    except Exception:
+        confidence = None
+
+    return result[0], reason, confidence

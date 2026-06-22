@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS claude_tool_traces (
     verdict TEXT,
     outcome TEXT,
     reason TEXT,
+    confidence REAL,
     trace_id TEXT,
     audit_hash TEXT,
     created_at TEXT NOT NULL
@@ -167,6 +168,10 @@ class ClaudeTraceStore:
     def ensure_schema(self) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(_SCHEMA)
+            try:
+                conn.execute("ALTER TABLE claude_tool_traces ADD COLUMN confidence REAL")
+            except sqlite3.OperationalError:
+                pass
             for index_sql in _INDEXES:
                 conn.execute(index_sql)
             conn.commit()
@@ -183,6 +188,7 @@ class ClaudeTraceStore:
         verdict: str | None,
         outcome: str | None,
         reason: str | None,
+        confidence: float | None = None,
         audit_hash: str | None = None,
         trace_id: str | None = None,
         agent_model: str | None = None,
@@ -198,9 +204,9 @@ class ClaudeTraceStore:
                 INSERT INTO claude_tool_traces (
                     id, timestamp, source, agent_id, agent_model, session_id,
                     transcript_path, tool_call_id, claude_tool_name, asf_tool_name,
-                    args_hash, args_preview, verdict, outcome, reason, trace_id,
-                    audit_hash, created_at
-                ) VALUES (?, ?, 'claude-code', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    args_hash, args_preview, verdict, outcome, reason, confidence,
+                    trace_id, audit_hash, created_at
+                ) VALUES (?, ?, 'claude-code', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row_id,
@@ -217,6 +223,7 @@ class ClaudeTraceStore:
                     verdict,
                     outcome,
                     reason,
+                    confidence,
                     trace_id,
                     audit_hash,
                     now,

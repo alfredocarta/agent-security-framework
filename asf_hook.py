@@ -385,11 +385,18 @@ def _handle_post_tool_use(payload: dict) -> None:
             session_id=session_id,
         )
         if not updated:
-            get_default_store().finish_trace(
+            updated = get_default_store().finish_trace(
                 result=result,
                 tool_call_id=tool_call_id,
             )
-    except Exception:
+        if not updated:
+            print(
+                f"[ASF WARN] PostToolUse output not persisted: tool_call_id={tool_call_id!r} "
+                f"tool={tool_name!r} — nessuna riga corrispondente nel DB",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[ASF WARN] PostToolUse finish_trace error: {exc}", flush=True)
         if FAIL_CLOSED:
             print("[ASF DENY] failed to persist PostToolUse output", flush=True)
             sys.exit(2)

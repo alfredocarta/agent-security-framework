@@ -142,6 +142,7 @@ def handle_client(conn):
         raw_verdict = result[0]
         verdict = raw_verdict
         reason = result[1] if len(result) > 1 else ""
+        confidence = result[2] if len(result) > 2 else None
         if verdict == "HITL":
             verdict = "DENY"
             reason = reason or "Human approval required"
@@ -170,6 +171,7 @@ def handle_client(conn):
                 verdict=raw_verdict,
                 outcome="ALLOWED" if verdict == "ALLOW" else "BLOCKED",
                 reason=reason,
+                confidence=confidence,
                 audit_hash=audit_hash,
             )
         except Exception as exc:

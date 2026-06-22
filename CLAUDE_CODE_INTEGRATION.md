@@ -302,6 +302,22 @@ catalog uses this label and score bucket to break down which mechanism blocked
 each agent. Historical rows keep their old generic reason and are not
 backfilled.
 
+### Confidence propagation
+
+`hardened_interceptor()` now returns a 3-tuple `(verdict, reason, confidence)`.
+The confidence value is extracted from the reason string via regex
+(`p=0.99` for DeBERTa, `confidence: 0.99` for Stage 2 classifier). If neither
+pattern matches (e.g. L1.5 heuristic blocks, Stage 1 regex kills), confidence
+is `None`.
+
+The daemon (`asf_hook_daemon.py`) reads `result[2]` and forwards it to
+`ClaudeTraceStore.start_trace()`. The `claude_tool_traces` table has a
+`confidence REAL` column; existing DBs are migrated automatically via
+`ALTER TABLE … ADD COLUMN` in `ensure_schema()`.
+
+Dashboard detail panels now show the numeric confidence score instead of
+`not recorded` for Claude Code hook traces.
+
 ### Transparency notes
 
 Claude Code native hooks now persist drill-down context in `claude_tool_traces`.
@@ -310,3 +326,18 @@ to the ASF audit event when available. PostToolUse stores the redacted and
 truncated output preview plus hash when Claude Code exposes output in the hook
 payload. If a native tool or Claude Code version omits output in PostToolUse, the
 dashboard renders output as `non registrato` for that call.
+
+---
+
+## Test environment
+
+The test DB (`asf_test.db`, selected by `ASF_ENV=test`) must be initialised
+before adversarial tests can produce DENY verdicts:
+
+```bash
+ASF_ENV=test python migrate_policies.py
+```
+
+Without this step the `policies` table is empty and Stage 1 kill-switch pattern
+matching is skipped, causing all calls to pass through regardless of content.
+This is the expected reason why a fresh test DB shows no blocked calls.
