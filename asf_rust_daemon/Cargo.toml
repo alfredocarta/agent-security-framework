@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "asf-rust-hook"
 path = "src/hook_client.rs"
 
+[[bin]]
+name = "asf-run"
+path = "src/wrapper.rs"
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22"
