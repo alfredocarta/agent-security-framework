@@ -162,7 +162,7 @@ Detection patterns are stored in a dedicated SQLite policies table with a conten
 
 ## Getting Started
 
-**Prerequisites:** Rust (https://rustup.rs) and Python 3.
+**Prerequisites:** Python 3 and pip.
 
 ```bash
 git clone <repo-url>
@@ -170,9 +170,7 @@ cd agent-security-framework
 ./install.sh
 ```
 
-`install.sh` builds the Rust daemon, installs Python dependencies, and creates an `asf-run` symlink in `~/.local/bin`. It is idempotent and does not require sudo.
-
-If `~/.local/bin` is not in your PATH, the script will print the line to add to your shell profile.
+`install.sh` auto-installs Rust via rustup if not present, builds the Rust daemon, installs Python dependencies, creates an `asf-run` symlink in `~/.local/bin`, and appends `~/.local/bin` to your shell profile if needed. It is idempotent and does not require sudo.
 
 Once installed:
 
