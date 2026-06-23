@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub fn resolve_db_path() -> PathBuf {
     if let Some(path) = env::var_os("ASF_HOOK_DB") {
@@ -79,7 +80,9 @@ pub fn write_deny_record(
             reason TEXT,
             human_reason TEXT,
             prev_hash TEXT,
-            trace_id TEXT
+            trace_id TEXT,
+            hostname TEXT,
+            username TEXT
         );
 
         CREATE TABLE IF NOT EXISTS claude_tool_traces (
@@ -106,6 +109,8 @@ pub fn write_deny_record(
         );
         ",
     )?;
+    let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN hostname TEXT", []);
+    let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN username TEXT", []);
 
     let stable_args = stable_json_value(&req.tool_input);
     let args_hash = sha256_hex(&stable_args);
@@ -142,13 +147,17 @@ pub fn write_deny_record(
     let args_preview = truncate_utf8(&stable_args, 8192);
     let agent_model = env::var("ASF_CLAUDE_AGENT_MODEL")
         .unwrap_or_else(|_| "claude-sonnet-4-6 via Claude Code".to_string());
+    let username = env::var("USER")
+        .or_else(|_| env::var("USERNAME"))
+        .unwrap_or_default();
+    let hostname = get_hostname();
 
     conn.execute(
         "
         INSERT INTO audit_trail
-            (hash, timestamp, agent_id, action, outcome, reason, human_reason, prev_hash, trace_id)
+            (hash, timestamp, agent_id, action, outcome, reason, human_reason, prev_hash, trace_id, hostname, username)
         VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)
+            (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)
         ",
         params![
             audit_hash,
@@ -159,6 +168,8 @@ pub fn write_deny_record(
             reason,
             prev_hash,
             trace_id,
+            hostname,
+            username,
         ],
     )?;
 
@@ -194,6 +205,16 @@ pub fn write_deny_record(
 
     conn.execute("COMMIT", [])?;
     Ok(())
+}
+
+fn get_hostname() -> String {
+    Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 fn utc_now() -> String {
