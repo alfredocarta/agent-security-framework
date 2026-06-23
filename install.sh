@@ -10,8 +10,9 @@ if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
-  echo "Error: Rust is not installed. Install it from https://rustup.rs and re-run install.sh."
-  exit 1
+  echo "Rust not found. Installing via rustup..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  source "$HOME/.cargo/env"
 fi
 
 if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
@@ -56,12 +57,14 @@ ln -sf "$SCRIPT_DIR/asf_rust_daemon/target/release/asf-run" "$BIN_DIR/asf-run"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
-    cat <<'EOF'
-Warning: ~/.local/bin is not in your PATH.
-Add this line to your shell profile (~/.bashrc, ~/.zshrc, etc.):
-  export PATH="$HOME/.local/bin:$PATH"
-Then restart your terminal or run: source ~/.zshrc
-EOF
+    SHELL_PROFILE=""
+    if [ -n "$ZSH_VERSION" ] || [ "$(basename "$SHELL")" = "zsh" ]; then
+      SHELL_PROFILE="$HOME/.zshrc"
+    else
+      SHELL_PROFILE="$HOME/.bashrc"
+    fi
+    echo "export PATH=\"$HOME/.local/bin:\$PATH\"" >> "$SHELL_PROFILE"
+    echo "Added ~/.local/bin to $SHELL_PROFILE. Run: source $SHELL_PROFILE"
     ;;
 esac
 
