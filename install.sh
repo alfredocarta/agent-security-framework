@@ -3,6 +3,12 @@
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
+# Source rustup env if cargo is not yet in PATH (common when running as bash on macOS)
+if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck source=/dev/null
+  source "$HOME/.cargo/env"
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
   echo "Error: Rust is not installed. Install it from https://rustup.rs and re-run install.sh."
   exit 1

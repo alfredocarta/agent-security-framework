@@ -83,6 +83,7 @@ fn main() {
             .args(["-m", "backend.main"])
             .current_dir(&dashboard_dir)
             .env("ASF_ROOT", asf_root.display().to_string())
+            .env("ASF_DASHBOARD_PORT", port.to_string())
             .exec();
 
         eprintln!("[asf-run] exec fallito: {err}");
@@ -134,8 +135,10 @@ fn main() {
 
 fn resolve_asf_root() -> PathBuf {
     // binary: <asf_root>/asf_rust_daemon/target/release/asf-run
+    // canonicalize() follows symlinks so ~/.local/bin/asf-run resolves correctly
     std::env::current_exe()
         .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
         .and_then(|p| {
             // release/ -> target/ -> asf_rust_daemon/ -> asf_root/
             p.parent()?.parent()?.parent()?.parent().map(PathBuf::from)
