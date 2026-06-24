@@ -3,6 +3,24 @@
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
+if [ -n "$CONDA_PREFIX" ] && [ -x "$CONDA_PREFIX/bin/python" ]; then
+  PYTHON_FOR_INSTALL="$CONDA_PREFIX/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_FOR_INSTALL="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_FOR_INSTALL="python"
+else
+  echo "Error: Python 3 is required. Install it and re-run install.sh."
+  exit 1
+fi
+
+PYTHON_VERSION=$("$PYTHON_FOR_INSTALL" -c 'import sys; print("%d.%d" % (sys.version_info[0], sys.version_info[1]))')
+if ! "$PYTHON_FOR_INSTALL" -c 'import sys; raise SystemExit(not (sys.version_info[0] > 3 or (sys.version_info[0] == 3 and sys.version_info[1] >= 11)))'; then
+  echo "ERROR: ASF requires Python 3.11 or later. Found Python $PYTHON_VERSION."
+  echo "Please activate a Python 3.11+ environment (e.g. conda activate <env>) and re-run install.sh."
+  exit 1
+fi
+
 # Source rustup env if cargo is not yet in PATH (common when running as bash on macOS)
 if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then
   # shellcheck source=/dev/null
@@ -53,7 +71,7 @@ case ":$PATH:" in
       SHELL_PROFILE="$HOME/.bashrc"
     fi
     echo "export PATH=\"$HOME/.local/bin:\$PATH\"" >> "$SHELL_PROFILE"
-    echo "Added ~/.local/bin to $SHELL_PROFILE. Run: source $SHELL_PROFILE"
+    echo "PATH updated in $SHELL_PROFILE. Run: source $SHELL_PROFILE or open a new terminal before using asf-run."
     ;;
 esac
 
