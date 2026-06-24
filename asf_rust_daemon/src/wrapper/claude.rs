@@ -1,11 +1,13 @@
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use serde_json::{json, Value};
 
 pub struct ClaudeAdapter;
 
 impl ClaudeAdapter {
-    pub fn new() -> Self { ClaudeAdapter }
+    pub fn new() -> Self {
+        ClaudeAdapter
+    }
 }
 
 impl crate::agent::AgentAdapter for ClaudeAdapter {
@@ -42,9 +44,13 @@ impl crate::agent::AgentAdapter for ClaudeAdapter {
         Ok(())
     }
 
-    fn extra_env(&self) -> Vec<(String, String)> { vec![] }
+    fn extra_env(&self) -> Vec<(String, String)> {
+        vec![]
+    }
 
-    fn executable(&self) -> String { "claude".to_string() }
+    fn executable(&self) -> String {
+        "claude".to_string()
+    }
 }
 
 const MATCHER: &str = "Bash|Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|WebFetch";
@@ -58,16 +64,22 @@ fn ensure_hooks(root: &mut Value, hook_bin: &str, hook_py: &str) -> bool {
 
     // PreToolUse: needs both hook_bin and hook_py
     let pre = hooks_obj.entry("PreToolUse").or_insert_with(|| json!([]));
-    changed |= ensure_entry(pre, MATCHER, &[
-        json!({"type": "command", "command": hook_bin}),
-        json!({"type": "command", "command": hook_py}),
-    ]);
+    changed |= ensure_entry(
+        pre,
+        MATCHER,
+        &[
+            json!({"type": "command", "command": hook_bin}),
+            json!({"type": "command", "command": hook_py}),
+        ],
+    );
 
     // PostToolUse: needs only hook_py
     let post = hooks_obj.entry("PostToolUse").or_insert_with(|| json!([]));
-    changed |= ensure_entry(post, MATCHER, &[
-        json!({"type": "command", "command": hook_py}),
-    ]);
+    changed |= ensure_entry(
+        post,
+        MATCHER,
+        &[json!({"type": "command", "command": hook_py})],
+    );
 
     changed
 }
@@ -106,13 +118,17 @@ fn dirs_next_home() -> PathBuf {
 fn resolve_python() -> Result<String, String> {
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         let p = PathBuf::from(prefix).join("bin/python");
-        if p.exists() { return Ok(p.display().to_string()); }
+        if p.exists() {
+            return Ok(p.display().to_string());
+        }
     }
     for candidate in &["python3", "python"] {
         if let Ok(out) = Command::new("which").arg(candidate).output() {
             if out.status.success() {
                 let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !path.is_empty() { return Ok(path); }
+                if !path.is_empty() {
+                    return Ok(path);
+                }
             }
         }
     }

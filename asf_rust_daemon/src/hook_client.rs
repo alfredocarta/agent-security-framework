@@ -9,6 +9,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "output_guard.rs"]
+mod output_guard_impl;
+use crate::output_guard_impl as output_guard;
+
 fn main() {
     const MAX_STDIN_BYTES: u64 = 256 * 1024;
     let mut raw = Vec::new();
@@ -35,6 +39,10 @@ fn main() {
     let session_id = payload["session_id"].as_str().map(|s| s.to_string());
     let transcript_path = payload["transcript_path"].as_str().map(|s| s.to_string());
     let tool_use_id = payload["tool_use_id"].as_str().map(|s| s.to_string());
+    let hook_event = payload["hook_event_name"]
+        .as_str()
+        .or_else(|| payload["event"].as_str())
+        .unwrap_or("PreToolUse");
 
     const SUPPORTED: &[&str] = &[
         "Bash",
@@ -48,6 +56,20 @@ fn main() {
         "WebFetch",
     ];
     if !SUPPORTED.contains(&tool_name.as_str()) {
+        std::process::exit(0);
+    }
+
+    if hook_event == "PostToolUse" {
+        if let Some(result_text) = extract_tool_result_text(&payload) {
+            let (is_dangerous, og_reason) = output_guard::check_output(&result_text, "");
+            if is_dangerous {
+                eprintln!("[OUTPUT_GUARD] Blocked: {og_reason}");
+                let reason = format!("OUTPUT_BLOCKED: {og_reason}");
+                print!("{}", block_message(&tool_name, &reason));
+                std::io::stdout().flush().ok();
+                std::process::exit(2);
+            }
+        }
         std::process::exit(0);
     }
 
@@ -90,6 +112,25 @@ fn main() {
             std::process::exit(0);
         }
     }
+}
+
+fn extract_tool_result_text(payload: &serde_json::Value) -> Option<String> {
+    for key in [
+        "tool_response",
+        "tool_output",
+        "output",
+        "response",
+        "result",
+    ] {
+        match payload.get(key) {
+            Some(serde_json::Value::Null) | None => continue,
+            Some(serde_json::Value::String(text)) => return Some(text.clone()),
+            Some(value) => {
+                return Some(serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
+            }
+        }
+    }
+    None
 }
 
 fn query_rust_daemon(request: &serde_json::Value) -> Result<(String, String), String> {

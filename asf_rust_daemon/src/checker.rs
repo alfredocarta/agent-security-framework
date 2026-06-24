@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::hardening;
 use crate::patterns::{KILL_SWITCH_PATTERNS, SEMANTIC_PROBE_PATTERNS};
 use crate::protocol::Verdict;
@@ -40,7 +42,16 @@ pub fn check(tool_input: &serde_json::Value) -> (Verdict, &'static str, &'static
 }
 
 fn extract_tool_input_text(tool_input: &serde_json::Value) -> Cow<'_, str> {
-    for key in ["command", "new_string", "new_source", "content", "pattern", "prompt", "file_path", "path"] {
+    for key in [
+        "command",
+        "new_string",
+        "new_source",
+        "content",
+        "pattern",
+        "prompt",
+        "file_path",
+        "path",
+    ] {
         if let Some(value) = tool_input[key].as_str() {
             return Cow::Borrowed(value);
         }

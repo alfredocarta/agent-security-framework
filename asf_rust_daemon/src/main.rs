@@ -1,18 +1,24 @@
+pub mod assessment;
+mod audit;
 mod checker;
 mod db;
 mod forwarder;
 mod hardening;
+mod interceptor;
+mod key_authority;
+mod output_guard;
 mod patterns;
 mod protocol;
+mod registry;
+mod sandbox;
+mod validator;
 
-use crate::checker::check;
-use crate::patterns::{KILL_SWITCH_PATTERNS, SEMANTIC_PROBE_PATTERNS};
 use crate::protocol::{CheckRequest, CheckResponse, Verdict};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::LazyLock;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -24,8 +30,6 @@ const LOG_NAME: &str = "asf_rust.log";
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    LazyLock::force(&KILL_SWITCH_PATTERNS);
-    LazyLock::force(&SEMANTIC_PROBE_PATTERNS);
     hardening::force_regexes();
 
     let config = Config::from_args()?;
@@ -168,7 +172,12 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
                 &request.transcript_path,
                 &request.agent_id,
             );
-            let (verdict, reason, db_outcome, extracted_text) = check(&request.tool_input);
+            // NOTE: Stage 1 now runs through interceptor::check_value(), which loads
+            // detection patterns from the SQLite policies DB at request time. The
+            // static regexes in patterns.rs remain in the codebase but are no longer
+            // the active detection set for daemon requests.
+            let (verdict, reason, db_outcome, extracted_text) =
+                interceptor::check_value(&request.tool_input);
             let (final_verdict, final_reason): (Verdict, String) = match verdict {
                 Verdict::Deny => (Verdict::Deny, reason.to_string()),
                 Verdict::Uncertain => {

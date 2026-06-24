@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 pub struct HermesAdapter;
 
 impl HermesAdapter {
-    pub fn new() -> Self { HermesAdapter }
+    pub fn new() -> Self {
+        HermesAdapter
+    }
 }
 
 impl crate::agent::AgentAdapter for HermesAdapter {
@@ -21,10 +23,7 @@ impl crate::agent::AgentAdapter for HermesAdapter {
             .join("asf_tracker_plugin.py");
 
         if !plugin_src.exists() {
-            return Err(format!(
-                "sorgente plugin non trovata: {:?}",
-                plugin_src
-            ));
+            return Err(format!("sorgente plugin non trovata: {:?}", plugin_src));
         }
 
         std::fs::create_dir_all(&plugin_dst)

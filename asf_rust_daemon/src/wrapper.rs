@@ -1,8 +1,13 @@
-#[path = "wrapper/agent.rs"]   mod agent;
-#[path = "wrapper/claude.rs"]  mod claude;
-#[path = "wrapper/daemon.rs"]  mod daemon;
-#[path = "wrapper/hermes.rs"]  mod hermes;
-#[path = "wrapper/session.rs"] mod session;
+#[path = "wrapper/agent.rs"]
+mod agent;
+#[path = "wrapper/claude.rs"]
+mod claude;
+#[path = "wrapper/daemon.rs"]
+mod daemon;
+#[path = "wrapper/hermes.rs"]
+mod hermes;
+#[path = "wrapper/session.rs"]
+mod session;
 
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -36,13 +41,24 @@ fn main() {
             .unwrap_or_else(|_| {
                 asf_root
                     .parent()
-                    .map(|parent| parent.join("agent-security-evaluation").join("dashboard_v2"))
-                    .unwrap_or_else(|| PathBuf::from("agent-security-evaluation").join("dashboard_v2"))
+                    .map(|parent| {
+                        parent
+                            .join("agent-security-evaluation")
+                            .join("dashboard_v2")
+                    })
+                    .unwrap_or_else(|| {
+                        PathBuf::from("agent-security-evaluation").join("dashboard_v2")
+                    })
             });
 
         if !dashboard_dir.is_dir() {
-            eprintln!("[asf-run] dashboard non trovata: {}", dashboard_dir.display());
-            eprintln!("[asf-run] imposta ASF_DASHBOARD_DIR per specificare la directory di dashboard_v2");
+            eprintln!(
+                "[asf-run] dashboard non trovata: {}",
+                dashboard_dir.display()
+            );
+            eprintln!(
+                "[asf-run] imposta ASF_DASHBOARD_DIR per specificare la directory di dashboard_v2"
+            );
             std::process::exit(1);
         }
 
@@ -100,7 +116,7 @@ fn main() {
     let agent_args = &args[2..];
 
     let asf_root = resolve_asf_root();
-    let runtime  = default_runtime_dir();
+    let runtime = default_runtime_dir();
 
     let adapter = agent::detect(&agent_name).unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -123,8 +139,8 @@ fn main() {
 
     let err = Command::new(adapter.executable())
         .args(agent_args)
-        .env("ASF_SESSION_ID",       &session_id)
-        .env("ASF_ROOT",             asf_root.display().to_string())
+        .env("ASF_SESSION_ID", &session_id)
+        .env("ASF_ROOT", asf_root.display().to_string())
         .env("ASF_HOOK_RUNTIME_DIR", runtime.display().to_string())
         .envs(adapter.extra_env())
         .exec();
@@ -152,13 +168,17 @@ fn resolve_asf_root() -> PathBuf {
 fn resolve_python() -> Result<String, String> {
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         let p = PathBuf::from(prefix).join("bin/python");
-        if p.exists() { return Ok(p.display().to_string()); }
+        if p.exists() {
+            return Ok(p.display().to_string());
+        }
     }
     for candidate in &["python3", "python"] {
         if let Ok(out) = Command::new("which").arg(candidate).output() {
             if out.status.success() {
                 let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !path.is_empty() { return Ok(path); }
+                if !path.is_empty() {
+                    return Ok(path);
+                }
             }
         }
     }
