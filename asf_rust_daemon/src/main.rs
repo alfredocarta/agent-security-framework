@@ -11,6 +11,8 @@ mod patterns;
 mod protocol;
 mod registry;
 mod sandbox;
+pub mod trace_preview;
+pub mod trace_store;
 mod validator;
 
 use crate::protocol::{CheckRequest, CheckResponse, Verdict};
