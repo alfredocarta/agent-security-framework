@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, TypedDict
 
 from wrapper import asf_core
+from wrapper.env_scrub import scrubbed_environ
 
 
 def _resolve_asf_root() -> Path:
@@ -225,6 +226,7 @@ class AsfLangGraphToolWrapper:
                 capture_output=True,
                 timeout=args.get("timeout") or 30,
                 check=False,
+                env=scrubbed_environ(),
             )
             return {"output": completed.stdout, "stderr": completed.stderr, "exit_code": completed.returncode, "sandboxed": False}
         if tool_name in {"execute_code", "python"}:
@@ -237,6 +239,7 @@ class AsfLangGraphToolWrapper:
                 capture_output=True,
                 timeout=args.get("timeout") or 30,
                 check=False,
+                env=scrubbed_environ(),
             )
             return {"output": completed.stdout, "stderr": completed.stderr, "exit_code": completed.returncode, "sandboxed": False}
         if tool_name not in self.tools:

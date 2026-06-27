@@ -27,6 +27,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from wrapper.env_scrub import scrub_env
+
 ASF_ROOT = Path(__file__).resolve().parents[1]
 SECCOMP_PROFILE = ASF_ROOT / "wrapper" / "asf_phase3_seccomp.json"
 
@@ -182,6 +184,7 @@ def hardened_run_args(
         env["NO_PROXY"] = "localhost,127.0.0.1"
     if extra_env:
         env.update(extra_env)
+    scrub_env(env)
     for key, value in env.items():
         args += ["-e", f"{key}={value}"]
 

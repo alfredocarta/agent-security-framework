@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from wrapper.asf_egress_proxy import EgressPolicy, parse_csv, parse_host_map, serve
+from wrapper.env_scrub import persist_openrouter_key_file, scrub_env
 
 ASF_ROOT = Path(__file__).resolve().parents[1]
 REPO_PLUGIN = ASF_ROOT / "integrations" / "hermes" / "asf_tracker_plugin.py"
@@ -32,6 +33,7 @@ def build_env(
     proxy_port: int | None = None,
 ) -> dict[str, str]:
     env = os.environ.copy()
+    persist_openrouter_key_file(env)
     env.update(
         {
             "ASF_ROOT": str(ASF_ROOT),
@@ -50,6 +52,7 @@ def build_env(
         env["ASF_HERMES_NET_ALLOW"] = net_allow
     if proxy_port is not None:
         env["ASF_EGRESS_PROXY_PORT"] = str(proxy_port)
+    scrub_env(env)
     return env
 
 

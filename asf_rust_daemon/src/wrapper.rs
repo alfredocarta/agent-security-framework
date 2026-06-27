@@ -13,6 +13,17 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
+const DEFAULT_SCRUB_ENV_VARS: &[&str] = &[
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GROQ_API_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_PUBLIC_KEY",
+    "ASF_MASTER_KEY",
+    "ASF_DASHBOARD_PASSWORD",
+];
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -137,13 +148,15 @@ fn main() {
 
     eprintln!("[asf-run] sessione {} — avvio {agent_name}", session_id);
 
-    let err = Command::new(adapter.executable())
+    let mut command = Command::new(adapter.executable());
+    command
         .args(agent_args)
         .env("ASF_SESSION_ID", &session_id)
         .env("ASF_ROOT", asf_root.display().to_string())
         .env("ASF_HOOK_RUNTIME_DIR", runtime.display().to_string())
-        .envs(adapter.extra_env())
-        .exec();
+        .envs(adapter.extra_env());
+    scrub_agent_env(&mut command);
+    let err = command.exec();
 
     eprintln!("[asf-run] exec fallito: {err}");
     std::process::exit(1);
@@ -183,6 +196,17 @@ fn resolve_python() -> Result<String, String> {
         }
     }
     Err("nessun interprete Python trovato (CONDA_PREFIX, python3, python)".to_string())
+}
+
+fn scrub_agent_env(command: &mut Command) {
+    for name in DEFAULT_SCRUB_ENV_VARS {
+        command.env_remove(name);
+    }
+    if let Ok(extra) = std::env::var("ASF_SCRUB_ENV_VARS") {
+        for name in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            command.env_remove(name);
+        }
+    }
 }
 
 fn default_runtime_dir() -> PathBuf {

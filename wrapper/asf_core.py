@@ -8,6 +8,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+from wrapper.env_scrub import scrub_env
 import tempfile
 import threading
 import time
@@ -597,6 +598,7 @@ def sandbox_env() -> dict[str, str]:
         env["https_proxy"] = proxy_url
         env["NO_PROXY"] = ""
         env["no_proxy"] = ""
+    scrub_env(env)
     return env
 
 
