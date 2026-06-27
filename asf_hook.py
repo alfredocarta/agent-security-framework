@@ -54,7 +54,7 @@ WATCHED_FILES   = [
     os.path.join(os.path.dirname(DAEMON_SCRIPT), "interceptor.py"),
     os.path.join(os.path.dirname(DAEMON_SCRIPT), "claude_trace_store.py"),
 ]
-PYTHON          = "/Users/alfredo/miniconda3/envs/eval-framework/bin/python"
+PYTHON          = os.environ.get("ASF_HOOK_PYTHON") or sys.executable
 TIMEOUT         = 1.0
 MAX_STDIN_BYTES = 256 * 1024
 
