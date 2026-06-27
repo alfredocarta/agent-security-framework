@@ -1,5 +1,6 @@
 pub mod assessment;
 mod audit;
+mod canonical_log;
 mod checker;
 mod db;
 mod forwarder;

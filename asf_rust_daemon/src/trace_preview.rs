@@ -1,4 +1,5 @@
-use serde_json::{Map, Value};
+use crate::canonical_log;
+use serde_json::{json, Map, Value};
 
 const CONTENT_KEYS: &[&str] = &[
     "output", "stdout", "content", "text", "result", "message", "body",
@@ -46,7 +47,14 @@ pub fn output_preview_text(value: &Value, max_bytes: usize) -> String {
         }
     }
 
-    truncate_preview_text(&text, max_bytes)
+    let preview = truncate_preview_text(&text, max_bytes);
+    canonical_log::log_value(
+        "trace_output_preview",
+        "rust",
+        value,
+        json!({"preview": preview}),
+    );
+    preview
 }
 
 pub fn truncate_preview_text(text: &str, max_bytes: usize) -> String {

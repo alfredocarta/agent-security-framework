@@ -9,6 +9,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
 import base64
+import canonical_log
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEY_DB_URL = f"sqlite:///{os.path.join(BASE_DIR, 'keys_registry.db')}"
@@ -33,12 +34,16 @@ MASTER_KEY = _get_master_key()
 def _encrypt(data: bytes) -> bytes:
     aesgcm = AESGCM(MASTER_KEY)
     nonce = os.urandom(12)
-    return nonce + aesgcm.encrypt(nonce, data, None)
+    out = nonce + aesgcm.encrypt(nonce, data, None)
+    canonical_log.log("key_encrypt", "py", data, {"ok": True, "bytes": len(out)})
+    return out
 
 def _decrypt(data: bytes) -> bytes:
     aesgcm = AESGCM(MASTER_KEY)
     nonce, ciphertext = data[:12], data[12:]
-    return aesgcm.decrypt(nonce, ciphertext, None)
+    out = aesgcm.decrypt(nonce, ciphertext, None)
+    canonical_log.log("key_decrypt", "py", data, {"ok": True, "bytes": len(out)})
+    return out
 
 class KeyModel(KeyBase):
     __tablename__ = "agent_keys"

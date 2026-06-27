@@ -1,8 +1,9 @@
+use crate::canonical_log;
 use crate::interceptor;
 use crate::key_authority;
 use crate::registry::{self, DbPool as RegistryDbPool};
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -73,10 +74,17 @@ pub fn validate_inter_agent_message(
         )
     }));
 
-    match result {
+    let verdict = match result {
         Ok(verdict) => verdict,
         Err(_) => (false, "VALIDATOR ERROR: internal panic caught.".to_string()),
-    }
+    };
+    canonical_log::log(
+        "validate_message",
+        "rust",
+        message,
+        json!({"valid": verdict.0, "reason": verdict.1}),
+    );
+    verdict
 }
 
 fn validate_inter_agent_message_inner(

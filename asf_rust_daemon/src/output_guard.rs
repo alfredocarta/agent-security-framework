@@ -1,4 +1,6 @@
+use crate::canonical_log;
 use regex::Regex;
+use serde_json::json;
 use std::sync::OnceLock;
 
 static SECRET_PATTERNS: OnceLock<[(Regex, &'static str); 9]> = OnceLock::new();
@@ -50,31 +52,36 @@ fn secret_patterns() -> &'static [(Regex, &'static str); 9] {
 /// Inspect tool output for security issues.
 /// Returns (is_dangerous, reason).
 pub fn check_output(result: &str, canary: &str) -> (bool, String) {
-    if result.is_empty() {
-        return (false, String::new());
-    }
-
-    // Check canary trap first
-    if !canary.is_empty() && result.contains(canary) {
-        return (true, format!("Canary trap triggered: {canary}"));
-    }
-
-    // Check secret patterns
-    for (pattern, name) in secret_patterns() {
-        if pattern.is_match(result) {
-            return (true, format!("Secret detected: {name}"));
+    let out = if result.is_empty() {
+        (false, String::new())
+    } else if !canary.is_empty() && result.contains(canary) {
+        (true, format!("Canary trap triggered: {canary}"))
+    } else {
+        let mut found: Option<(bool, String)> = None;
+        for (pattern, name) in secret_patterns() {
+            if pattern.is_match(result) {
+                found = Some((true, format!("Secret detected: {name}")));
+                break;
+            }
         }
-    }
-
-    // Check for bulk data exfiltration (many rows)
-    if result.matches('{').count() > 10 {
-        return (
-            true,
-            "Potential bulk data exfiltration (>10 records)".to_string(),
-        );
-    }
-
-    (false, String::new())
+        found.unwrap_or_else(|| {
+            if result.matches('{').count() > 10 {
+                (
+                    true,
+                    "Potential bulk data exfiltration (>10 records)".to_string(),
+                )
+            } else {
+                (false, String::new())
+            }
+        })
+    };
+    canonical_log::log(
+        "output_guard",
+        "rust",
+        result,
+        json!({"leaked": out.0, "reason": out.1}),
+    );
+    out
 }
 
 #[cfg(test)]

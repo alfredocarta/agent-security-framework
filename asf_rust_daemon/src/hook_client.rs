@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "canonical_log.rs"]
+mod canonical_log;
 #[path = "output_guard.rs"]
 mod output_guard_impl;
 use crate::output_guard_impl as output_guard;
