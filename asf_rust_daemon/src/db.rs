@@ -208,18 +208,19 @@ fn prepare_conn(conn: &Connection) -> rusqlite::Result<()> {
 fn build_trace_fields(req: &crate::protocol::CheckRequest) -> TraceFields {
     let stable_args = stable_json_value(&req.tool_input);
     let args_hash = sha256_hex(&stable_args);
-    let computed_tool_call_id = compute_tool_call_id(
-        &req.session_id,
-        &req.transcript_path,
+    let tool_call_id = effective_tool_call_id(
+        req.tool_use_id.as_deref(),
+        req.session_id.as_deref(),
+        req.transcript_path.as_deref(),
         &req.tool_name,
         &args_hash,
     );
-    let tool_call_id = req
-        .tool_use_id
-        .as_deref()
-        .map(str::to_string)
-        .unwrap_or(computed_tool_call_id);
-    let trace_id = compute_trace_id(&req.session_id, &tool_call_id, &req.tool_name, &args_hash);
+    let trace_id = compute_trace_id(
+        req.session_id.as_deref(),
+        &tool_call_id,
+        &req.tool_name,
+        &args_hash,
+    );
     let agent_model = env::var("ASF_CLAUDE_AGENT_MODEL")
         .unwrap_or_else(|_| "claude-sonnet-4-6 via Claude Code".to_string());
 
@@ -350,6 +351,34 @@ pub fn compute_tool_call_id(
     tool_name: &str,
     args_hash: &str,
 ) -> String {
+    compute_tool_call_id_from_parts(
+        session_id.as_deref(),
+        transcript_path.as_deref(),
+        tool_name,
+        args_hash,
+    )
+}
+
+pub fn effective_tool_call_id(
+    explicit_tool_call_id: Option<&str>,
+    session_id: Option<&str>,
+    transcript_path: Option<&str>,
+    tool_name: &str,
+    args_hash: &str,
+) -> String {
+    explicit_tool_call_id
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            compute_tool_call_id_from_parts(session_id, transcript_path, tool_name, args_hash)
+        })
+}
+
+fn compute_tool_call_id_from_parts(
+    session_id: Option<&str>,
+    transcript_path: Option<&str>,
+    tool_name: &str,
+    args_hash: &str,
+) -> String {
     let mut seed = Map::new();
     seed.insert(
         "args_hash".to_string(),
@@ -358,8 +387,7 @@ pub fn compute_tool_call_id(
     seed.insert(
         "session_id".to_string(),
         session_id
-            .as_ref()
-            .map(|value| Value::String(value.clone()))
+            .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
     seed.insert(
@@ -369,8 +397,7 @@ pub fn compute_tool_call_id(
     seed.insert(
         "transcript_path".to_string(),
         transcript_path
-            .as_ref()
-            .map(|value| Value::String(value.clone()))
+            .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
 
@@ -378,8 +405,8 @@ pub fn compute_tool_call_id(
     format!("claude-call-{}", &sha256_hex(seed.as_bytes())[..16])
 }
 
-fn compute_trace_id(
-    session_id: &Option<String>,
+pub fn compute_trace_id(
+    session_id: Option<&str>,
     tool_call_id: &str,
     tool_name: &str,
     args_hash: &str,
@@ -392,8 +419,7 @@ fn compute_trace_id(
     seed.insert(
         "session_id".to_string(),
         session_id
-            .as_ref()
-            .map(|value| Value::String(value.clone()))
+            .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
     seed.insert(

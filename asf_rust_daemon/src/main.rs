@@ -182,6 +182,8 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
                 &request.agent_id,
                 &request.tool_name,
                 request.session_id.as_deref(),
+                request.transcript_path.as_deref(),
+                request.tool_use_id.as_deref(),
                 &request.tool_input,
             );
             let mut write_allow_trace = false;

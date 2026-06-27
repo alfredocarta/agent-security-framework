@@ -12,17 +12,25 @@ const HEURISTIC_BLOCK_THRESHOLD: f64 = 0.50;
 
 // ── Global DB pool (opened lazily from the same path used by the rest of the daemon) ──
 
+#[cfg(not(test))]
 static DB_POOL: OnceLock<Arc<DbPool>> = OnceLock::new();
 
-fn db_pool() -> &'static Arc<DbPool> {
-    DB_POOL.get_or_init(|| {
+#[cfg(not(test))]
+fn db_pool() -> Arc<DbPool> {
+    Arc::clone(DB_POOL.get_or_init(|| {
         let path = db::resolve_db_path();
         Arc::new(registry::open_db(&path))
-    })
+    }))
+}
+
+#[cfg(test)]
+fn db_pool() -> Arc<DbPool> {
+    let path = db::resolve_db_path();
+    Arc::new(registry::open_db(&path))
 }
 
 fn auditor() -> AuditTrail {
-    let audit = AuditTrail::new(Arc::clone(db_pool()));
+    let audit = AuditTrail::new(db_pool());
     let _ = audit.ensure_optional_columns();
     audit
 }
@@ -34,9 +42,11 @@ fn log_audit_event(
     outcome: &str,
     reason: impl Into<String>,
     session_id: Option<&str>,
+    trace_id: Option<&str>,
 ) {
     let mut event = AuditEvent::new(agent_id, tool_name, outcome, reason.into());
     event.session_id = session_id.map(str::to_string);
+    event.trace_id = trace_id.map(str::to_string);
     let _ = auditor.log_event(event);
 }
 
@@ -95,7 +105,7 @@ pub fn _semantic_probe(text: &str) -> bool {
 
 pub fn _stage1_regex(tool_input: &str) -> Result<(bool, Option<String>), String> {
     let pool = db_pool();
-    let patterns = registry::get_detection_patterns(pool)
+    let patterns = registry::get_detection_patterns(&pool)
         .map_err(|e| format!("DB error loading detection patterns: {e}"))?;
 
     let patterns = match patterns {
@@ -126,6 +136,7 @@ pub fn _heuristic_fastpath(
     agent_id: &str,
     tool_name: &str,
     session_id: Option<&str>,
+    trace_id: Option<&str>,
     tool_input: &str,
     probe_fired: bool,
 ) -> Option<(String, String)> {
@@ -157,6 +168,7 @@ pub fn _heuristic_fastpath(
             "HEURISTIC_BLOCK",
             format!("Blocked by heuristic fast-path (score={score_pct})"),
             session_id,
+            trace_id,
         );
         return Some((
             "DENY".to_string(),
@@ -179,6 +191,7 @@ pub fn _heuristic_fastpath(
                     "Semantic probe triggered on heuristic-clear candidate (score={score:.2}), escalating to pipeline"
                 ),
                 session_id,
+                trace_id,
             );
             return None;
         }
@@ -190,6 +203,7 @@ pub fn _heuristic_fastpath(
             "HEURISTIC_CLEAR",
             format!("Cleared by heuristic fast-path ({score_pct})"),
             session_id,
+            trace_id,
         );
         return Some((
             "ALLOW".to_string(),
@@ -221,14 +235,52 @@ pub fn extract_tool_input_text(tool_input: &serde_json::Value) -> String {
     serde_json::to_string(tool_input).unwrap_or_default()
 }
 
+fn trace_id_for_call(
+    session_id: Option<&str>,
+    transcript_path: Option<&str>,
+    explicit_tool_call_id: Option<&str>,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> Option<String> {
+    let args_hash = db::compute_args_hash(tool_input);
+    let tool_call_id = db::effective_tool_call_id(
+        explicit_tool_call_id,
+        session_id,
+        transcript_path,
+        tool_name,
+        &args_hash,
+    );
+    Some(db::compute_trace_id(
+        session_id,
+        &tool_call_id,
+        tool_name,
+        &args_hash,
+    ))
+}
+
 pub fn check_value(
     agent_id: &str,
     tool_name: &str,
     session_id: Option<&str>,
+    transcript_path: Option<&str>,
+    tool_call_id: Option<&str>,
     tool_input: &serde_json::Value,
 ) -> (Verdict, String, String, String) {
     let extracted_text = extract_tool_input_text(tool_input);
-    let (outcome, reason) = security_interceptor(agent_id, tool_name, session_id, &extracted_text);
+    let trace_id = trace_id_for_call(
+        session_id,
+        transcript_path,
+        tool_call_id,
+        tool_name,
+        tool_input,
+    );
+    let (outcome, reason) = security_interceptor(
+        agent_id,
+        tool_name,
+        session_id,
+        trace_id.as_deref(),
+        &extracted_text,
+    );
 
     let verdict = match outcome.as_str() {
         "DENY" => Verdict::Deny,
@@ -253,6 +305,7 @@ pub fn security_interceptor(
     agent_id: &str,
     tool_name: &str,
     session_id: Option<&str>,
+    trace_id: Option<&str>,
     tool_input: &str,
 ) -> (String, String) {
     let _start = Instant::now();
@@ -263,7 +316,7 @@ pub fn security_interceptor(
     match _stage1_regex(tool_input) {
         Ok((true, pattern)) => {
             let matched = pattern.unwrap_or_else(|| "<unknown>".to_string());
-            let _ = registry::suspend_agent(pool, agent_id);
+            let _ = registry::suspend_agent(&pool, agent_id);
             log_audit_event(
                 &auditor,
                 agent_id,
@@ -271,6 +324,7 @@ pub fn security_interceptor(
                 "KILL_SWITCH",
                 format!("Stage 1 regex matched: {matched}"),
                 session_id,
+                trace_id,
             );
             return (
                 "DENY".to_string(),
@@ -286,6 +340,7 @@ pub fn security_interceptor(
                 "STAGE1_ERROR",
                 &err,
                 session_id,
+                trace_id,
             );
             return (
                 "DENY".to_string(),
@@ -294,9 +349,14 @@ pub fn security_interceptor(
         }
     }
 
-    if let Some(result) =
-        _heuristic_fastpath(agent_id, tool_name, session_id, tool_input, probe_fired)
-    {
+    if let Some(result) = _heuristic_fastpath(
+        agent_id,
+        tool_name,
+        session_id,
+        trace_id,
+        tool_input,
+        probe_fired,
+    ) {
         return result;
     }
 
@@ -308,6 +368,7 @@ pub fn security_interceptor(
             "SEMANTIC_PROBE_ESCALATE",
             "Semantic probe triggered; requires Python Stage 2/3 adjudication",
             session_id,
+            trace_id,
         );
     }
 
@@ -331,7 +392,8 @@ pub fn hardened_interceptor(
     tool_name: &str,
     tool_input: &str,
 ) -> (String, String, Option<String>) {
-    let interceptor_fn: InterceptorFn = Box::new(|a, t, i| security_interceptor(a, t, None, i));
+    let interceptor_fn: InterceptorFn =
+        Box::new(|a, t, i| security_interceptor(a, t, None, None, i));
     hardening::apply_l1_5_hardening(agent_id, tool_name, tool_input, Some(interceptor_fn))
 }
 
@@ -349,10 +411,21 @@ fn compile_patterns(patterns: &[&str]) -> Vec<Regex> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::CheckRequest;
     use rusqlite::Connection;
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test env lock poisoned")
+    }
 
     fn unique_test_db_path() -> PathBuf {
         let nanos = SystemTime::now()
@@ -367,6 +440,7 @@ mod tests {
 
     #[test]
     fn check_value_logs_request_identity_instead_of_placeholders() {
+        let _guard = test_env_lock();
         let db_path = unique_test_db_path();
         let db = registry::open_db(&db_path);
         registry::store_detection_patterns(&db, &json!(["ASF_ATTRIBUTION_TEST_SENTINEL"]))
@@ -380,6 +454,8 @@ mod tests {
             "claude-code",
             "Bash",
             Some("claude-session-123"),
+            Some("/tmp/claude-session-123.jsonl"),
+            Some("toolu-stage1-test"),
             &tool_input,
         );
 
@@ -405,6 +481,72 @@ mod tests {
         assert_eq!(outcome, "KILL_SWITCH");
         assert_eq!(session_id.as_deref(), Some("claude-session-123"));
 
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn fast_path_allow_audit_trace_id_matches_claude_tool_trace() {
+        let _guard = test_env_lock();
+        let db_path = unique_test_db_path();
+        let db = registry::open_db(&db_path);
+        registry::store_detection_patterns(&db, &json!([])).expect("store empty test patterns");
+        drop(db);
+
+        std::env::set_var("ASF_HOOK_DB", &db_path);
+        std::env::remove_var("ASF_DISABLE_FASTPATH");
+        std::env::remove_var("ASF_ALWAYS_STAGE25");
+        std::env::set_var("ASF_CLEAR_THRESHOLD", "0.02");
+
+        let tool_input = json!({"command": "pwd"});
+        let req = CheckRequest {
+            tool_name: "Bash".to_string(),
+            tool_input: tool_input.clone(),
+            session_id: Some("claude-session-fast-allow".to_string()),
+            transcript_path: Some("/tmp/claude-session-fast-allow.jsonl".to_string()),
+            tool_use_id: Some("toolu-fast-allow".to_string()),
+            agent_id: "claude-code".to_string(),
+        };
+
+        let (verdict, reason, db_outcome, _extracted_text) = check_value(
+            &req.agent_id,
+            &req.tool_name,
+            req.session_id.as_deref(),
+            req.transcript_path.as_deref(),
+            req.tool_use_id.as_deref(),
+            &req.tool_input,
+        );
+        assert!(matches!(verdict, Verdict::Allow));
+        assert!(reason.contains("heuristic"));
+        assert_eq!(db_outcome, "");
+
+        db::write_claude_trace(&db_path, &req, "ALLOW", "HEURISTIC_CLEAR", &reason)
+            .expect("write claude trace");
+
+        let conn = Connection::open(&db_path).expect("open test db");
+        let audit_trace_id: String = conn
+            .query_row(
+                "SELECT trace_id FROM audit_trail \
+                 WHERE outcome = 'HEURISTIC_CLEAR' \
+                 ORDER BY timestamp DESC \
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read heuristic clear audit trace_id");
+        let claude_trace_id: String = conn
+            .query_row(
+                "SELECT trace_id FROM claude_tool_traces \
+                 WHERE tool_call_id = 'toolu-fast-allow' \
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read claude tool trace_id");
+
+        assert!(!audit_trace_id.is_empty());
+        assert_eq!(audit_trace_id, claude_trace_id);
+
+        drop(conn);
         let _ = std::fs::remove_file(db_path);
     }
 }
