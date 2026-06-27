@@ -67,8 +67,92 @@ pub fn write_deny_record(
     outcome: &str,
 ) -> rusqlite::Result<()> {
     let conn = Connection::open(db_path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+    prepare_conn(&conn)?;
 
+    let trace_fields = build_trace_fields(req);
+
+    conn.execute("BEGIN IMMEDIATE", [])?;
+
+    let prev_hash: String = conn
+        .query_row(
+            "SELECT hash FROM audit_trail ORDER BY timestamp DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "0".repeat(64));
+
+    let action = &req.tool_name;
+    let audit_data = format!(
+        "{}{}{}{}{}",
+        trace_fields.agent_id, action, outcome, reason, prev_hash
+    );
+    let audit_hash = sha256_hex(audit_data.as_bytes());
+    let now = utc_now();
+    let username = env::var("USER")
+        .or_else(|_| env::var("USERNAME"))
+        .unwrap_or_default();
+    let hostname = get_hostname();
+
+    conn.execute(
+        "
+        INSERT INTO audit_trail
+            (hash, timestamp, agent_id, action, outcome, reason, human_reason, prev_hash, trace_id, session_id, hostname, username)
+        VALUES
+            (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)
+        ",
+        params![
+            audit_hash,
+            now,
+            trace_fields.agent_id.as_str(),
+            action,
+            outcome,
+            reason,
+            prev_hash,
+            trace_fields.trace_id.as_str(),
+            req.session_id,
+            hostname,
+            username,
+        ],
+    )?;
+
+    insert_claude_trace(
+        &conn,
+        req,
+        &trace_fields,
+        "DENY",
+        outcome,
+        reason,
+        Some(audit_hash.as_str()),
+    )?;
+
+    conn.execute("COMMIT", [])?;
+    Ok(())
+}
+
+pub fn write_claude_trace(
+    db_path: &Path,
+    req: &crate::protocol::CheckRequest,
+    verdict: &str,
+    outcome: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    let conn = Connection::open(db_path)?;
+    prepare_conn(&conn)?;
+    let trace_fields = build_trace_fields(req);
+    insert_claude_trace(&conn, req, &trace_fields, verdict, outcome, reason, None)
+}
+
+struct TraceFields {
+    agent_id: String,
+    agent_model: String,
+    args_hash: String,
+    args_preview: String,
+    tool_call_id: String,
+    trace_id: String,
+}
+
+fn prepare_conn(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS audit_trail (
@@ -104,6 +188,7 @@ pub fn write_deny_record(
             verdict TEXT,
             outcome TEXT,
             reason TEXT,
+            confidence REAL,
             trace_id TEXT,
             audit_hash TEXT,
             created_at TEXT NOT NULL
@@ -113,7 +198,14 @@ pub fn write_deny_record(
     let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN hostname TEXT", []);
     let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN username TEXT", []);
     let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN session_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE claude_tool_traces ADD COLUMN confidence REAL",
+        [],
+    );
+    Ok(())
+}
 
+fn build_trace_fields(req: &crate::protocol::CheckRequest) -> TraceFields {
     let stable_args = stable_json_value(&req.tool_input);
     let args_hash = sha256_hex(&stable_args);
     let computed_tool_call_id = compute_tool_call_id(
@@ -128,85 +220,65 @@ pub fn write_deny_record(
         .map(str::to_string)
         .unwrap_or(computed_tool_call_id);
     let trace_id = compute_trace_id(&req.session_id, &tool_call_id, &req.tool_name, &args_hash);
-    let asf_tool = crate::forwarder::asf_tool_name(&req.tool_name);
-
-    conn.execute("BEGIN IMMEDIATE", [])?;
-
-    let prev_hash: String = conn
-        .query_row(
-            "SELECT hash FROM audit_trail ORDER BY timestamp DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "0".repeat(64));
-
-    let agent_id = namespaced_agent_id(&req.agent_id);
-    let action = &req.tool_name;
-    let audit_data = format!("{}{}{}{}{}", agent_id, action, outcome, reason, prev_hash);
-    let audit_hash = sha256_hex(audit_data.as_bytes());
-    let now = utc_now();
-    let row_id = uuid::Uuid::new_v4().simple().to_string();
-    let args_preview = truncate_utf8(&stable_args, 8192);
     let agent_model = env::var("ASF_CLAUDE_AGENT_MODEL")
         .unwrap_or_else(|_| "claude-sonnet-4-6 via Claude Code".to_string());
-    let username = env::var("USER")
-        .or_else(|_| env::var("USERNAME"))
-        .unwrap_or_default();
-    let hostname = get_hostname();
 
-    conn.execute(
-        "
-        INSERT INTO audit_trail
-            (hash, timestamp, agent_id, action, outcome, reason, human_reason, prev_hash, trace_id, session_id, hostname, username)
-        VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)
-        ",
-        params![
-            audit_hash,
-            now,
-            agent_id.as_str(),
-            action,
-            outcome,
-            reason,
-            prev_hash,
-            trace_id,
-            req.session_id,
-            hostname,
-            username,
-        ],
-    )?;
+    TraceFields {
+        agent_id: namespaced_agent_id(&req.agent_id),
+        agent_model,
+        args_hash,
+        args_preview: truncate_utf8(&stable_args, 8192),
+        tool_call_id,
+        trace_id,
+    }
+}
+
+fn insert_claude_trace(
+    conn: &Connection,
+    req: &crate::protocol::CheckRequest,
+    trace_fields: &TraceFields,
+    verdict: &str,
+    outcome: &str,
+    reason: &str,
+    audit_hash: Option<&str>,
+) -> rusqlite::Result<()> {
+    let asf_tool = crate::forwarder::asf_tool_name(&req.tool_name);
+    let now = utc_now();
+    let row_id = uuid::Uuid::new_v4().simple().to_string();
 
     conn.execute(
         "
         INSERT INTO claude_tool_traces
             (id, timestamp, source, agent_id, agent_model, session_id, transcript_path,
              tool_call_id, claude_tool_name, asf_tool_name, args_hash, args_preview,
-             output_hash, output_preview, verdict, outcome, reason, trace_id, audit_hash, created_at)
-        VALUES
-            (?1, ?2, 'claude-code', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-             NULL, NULL, 'DENY', ?12, ?13, ?14, ?15, ?16)
+             output_hash, output_preview, verdict, outcome, reason, confidence, trace_id, audit_hash, created_at)
+        SELECT
+            ?1, ?2, 'claude-code', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+            NULL, NULL, ?12, ?13, ?14, NULL, ?15, ?16, ?17
+        WHERE NOT EXISTS (
+            SELECT 1 FROM claude_tool_traces WHERE tool_call_id = ?7
+        )
         ",
         params![
             row_id,
             now,
-            agent_id.as_str(),
-            agent_model,
+            trace_fields.agent_id.as_str(),
+            trace_fields.agent_model.as_str(),
             req.session_id,
             req.transcript_path,
-            tool_call_id,
+            trace_fields.tool_call_id.as_str(),
             req.tool_name,
             asf_tool,
-            args_hash,
-            args_preview,
+            trace_fields.args_hash.as_str(),
+            trace_fields.args_preview.as_str(),
+            verdict,
             outcome,
             reason,
-            trace_id,
+            trace_fields.trace_id.as_str(),
             audit_hash,
             now,
         ],
     )?;
-
-    conn.execute("COMMIT", [])?;
     Ok(())
 }
 
@@ -349,4 +421,154 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> String {
 
     let truncated_bytes = s.len() - boundary;
     format!("{}...[truncated {truncated_bytes} bytes]", &s[..boundary])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::CheckRequest;
+    use rusqlite::Connection;
+    use serde_json::json;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_db_path() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "asf-rust-daemon-allow-trace-{}-{nanos}.db",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn fast_path_allow_trace_matches_post_tool_use_finish_trace() {
+        let db_path = unique_test_db_path();
+        let tool_input = json!({"command": "pwd"});
+        let req = CheckRequest {
+            tool_name: "Bash".to_string(),
+            tool_input,
+            session_id: Some("session-fast-allow".to_string()),
+            transcript_path: Some("/tmp/transcript-fast-allow.jsonl".to_string()),
+            tool_use_id: None,
+            agent_id: "claude-code-agent".to_string(),
+        };
+        let args_hash = compute_args_hash(&req.tool_input);
+        let expected_tool_call_id = compute_tool_call_id(
+            &req.session_id,
+            &req.transcript_path,
+            &req.tool_name,
+            &args_hash,
+        );
+
+        write_claude_trace(
+            &db_path,
+            &req,
+            "ALLOW",
+            "HEURISTIC_CLEAR",
+            "Cleared by heuristic (0%)",
+        )
+        .expect("write fast-path allow trace");
+        write_claude_trace(
+            &db_path,
+            &req,
+            "ALLOW",
+            "HEURISTIC_CLEAR",
+            "Cleared by heuristic (0%)",
+        )
+        .expect("idempotent fast-path allow trace");
+
+        let conn = Connection::open(&db_path).expect("open test db");
+        let trace_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM claude_tool_traces WHERE tool_call_id = ?1",
+                [expected_tool_call_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("count trace rows");
+        assert_eq!(trace_count, 1);
+
+        let (tool_call_id, args_preview, agent_id, claude_tool_name, asf_tool_name, verdict): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT tool_call_id, args_preview, agent_id, claude_tool_name, asf_tool_name, verdict \
+                 FROM claude_tool_traces WHERE tool_call_id = ?1",
+                [expected_tool_call_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read allow trace row");
+
+        assert_eq!(tool_call_id, expected_tool_call_id);
+        assert_eq!(args_preview, stable_json_value(&req.tool_input));
+        assert_eq!(agent_id, "claude-code-agent");
+        assert_eq!(claude_tool_name, "Bash");
+        assert_eq!(asf_tool_name, "shell");
+        assert_eq!(verdict, "ALLOW");
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = manifest_dir
+            .parent()
+            .expect("manifest has project parent")
+            .to_path_buf();
+        let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let finish = Command::new(python)
+            .current_dir(&project_root)
+            .arg("-c")
+            .arg(
+                r#"
+import sys
+from claude_trace_store import ClaudeTraceStore, make_tool_call_id
+payload = {
+    "session_id": "session-fast-allow",
+    "transcript_path": "/tmp/transcript-fast-allow.jsonl",
+}
+assert make_tool_call_id(payload, "Bash", {"command": "pwd"}) == sys.argv[2]
+updated = ClaudeTraceStore(sys.argv[1]).finish_trace(
+    result={"content": "fast-path output recorded"},
+    tool_call_id=sys.argv[2],
+    session_id="session-fast-allow",
+)
+assert updated == 1, updated
+"#,
+            )
+            .arg(&db_path)
+            .arg(&expected_tool_call_id)
+            .output()
+            .expect("run Python finish_trace");
+        assert!(
+            finish.status.success(),
+            "finish_trace failed\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&finish.stdout),
+            String::from_utf8_lossy(&finish.stderr)
+        );
+
+        let output_preview: String = conn
+            .query_row(
+                "SELECT output_preview FROM claude_tool_traces WHERE tool_call_id = ?1",
+                [expected_tool_call_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("read output preview");
+        assert!(output_preview.contains("fast-path output recorded"));
+
+        drop(conn);
+        let _ = std::fs::remove_file(db_path);
+    }
 }

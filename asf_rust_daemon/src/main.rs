@@ -184,6 +184,7 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
                 request.session_id.as_deref(),
                 &request.tool_input,
             );
+            let mut write_allow_trace = false;
             let (final_verdict, final_reason): (Verdict, String) = match verdict {
                 Verdict::Deny => (Verdict::Deny, reason.to_string()),
                 Verdict::Uncertain => {
@@ -204,6 +205,7 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
                             if fail_closed {
                                 (Verdict::Deny, "python_daemon_unavailable".to_string())
                             } else {
+                                write_allow_trace = true;
                                 (
                                     Verdict::Allow,
                                     "python_daemon_unavailable_allow".to_string(),
@@ -212,7 +214,10 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
                         }
                     }
                 }
-                Verdict::Allow => (Verdict::Allow, reason.to_string()),
+                Verdict::Allow => {
+                    write_allow_trace = true;
+                    (Verdict::Allow, reason.to_string())
+                }
             };
 
             log_check(log_path, &request.tool_name, final_verdict, &final_reason);
@@ -241,6 +246,35 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
                         log_path,
                         "ERROR",
                         &format!("failed to write deny record: {err}"),
+                    );
+                }
+            } else if matches!(final_verdict, Verdict::Allow) && write_allow_trace {
+                let db_path = db::resolve_db_path();
+                let allow_outcome = if final_reason == "python_daemon_unavailable_allow" {
+                    "FAIL_OPEN_ALLOW".to_string()
+                } else if db_outcome.is_empty() {
+                    "HEURISTIC_CLEAR".to_string()
+                } else {
+                    db_outcome.to_string()
+                };
+                let final_reason_clone = final_reason.clone();
+                if let Err(err) = tokio::task::spawn_blocking(move || {
+                    db::write_claude_trace(
+                        &db_path,
+                        &request,
+                        "ALLOW",
+                        &allow_outcome,
+                        &final_reason_clone,
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()))
+                {
+                    log_line(
+                        log_path,
+                        "ERROR",
+                        &format!("failed to write allow trace: {err}"),
                     );
                 }
             }
