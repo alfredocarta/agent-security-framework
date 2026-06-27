@@ -178,8 +178,12 @@ async fn handle_connection(stream: UnixStream, log_path: &Path) -> io::Result<()
             // detection patterns from the SQLite policies DB at request time. The
             // static regexes in patterns.rs remain in the codebase but are no longer
             // the active detection set for daemon requests.
-            let (verdict, reason, db_outcome, extracted_text) =
-                interceptor::check_value(&request.tool_input);
+            let (verdict, reason, db_outcome, extracted_text) = interceptor::check_value(
+                &request.agent_id,
+                &request.tool_name,
+                request.session_id.as_deref(),
+                &request.tool_input,
+            );
             let (final_verdict, final_reason): (Verdict, String) = match verdict {
                 Verdict::Deny => (Verdict::Deny, reason.to_string()),
                 Verdict::Uncertain => {

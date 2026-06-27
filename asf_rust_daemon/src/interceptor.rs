@@ -22,7 +22,22 @@ fn db_pool() -> &'static Arc<DbPool> {
 }
 
 fn auditor() -> AuditTrail {
-    AuditTrail::new(Arc::clone(db_pool()))
+    let audit = AuditTrail::new(Arc::clone(db_pool()));
+    let _ = audit.ensure_optional_columns();
+    audit
+}
+
+fn log_audit_event(
+    auditor: &AuditTrail,
+    agent_id: &str,
+    tool_name: &str,
+    outcome: &str,
+    reason: impl Into<String>,
+    session_id: Option<&str>,
+) {
+    let mut event = AuditEvent::new(agent_id, tool_name, outcome, reason.into());
+    event.session_id = session_id.map(str::to_string);
+    let _ = auditor.log_event(event);
 }
 
 // ── Semantic probe patterns ──
@@ -110,6 +125,7 @@ pub fn _stage1_regex(tool_input: &str) -> Result<(bool, Option<String>), String>
 pub fn _heuristic_fastpath(
     agent_id: &str,
     tool_name: &str,
+    session_id: Option<&str>,
     tool_input: &str,
     probe_fired: bool,
 ) -> Option<(String, String)> {
@@ -134,12 +150,14 @@ pub fn _heuristic_fastpath(
 
     if score >= block_threshold {
         let score_pct = format!("{:.0}%", score * 100.0);
-        let _ = auditor.log_event(AuditEvent::new(
+        log_audit_event(
+            &auditor,
             agent_id,
             tool_name,
             "HEURISTIC_BLOCK",
             format!("Blocked by heuristic fast-path (score={score_pct})"),
-        ));
+            session_id,
+        );
         return Some((
             "DENY".to_string(),
             format!("BLOCKED by heuristic (score={score_pct})"),
@@ -152,23 +170,27 @@ pub fn _heuristic_fastpath(
 
     if score <= clear_threshold && !always_stage25 {
         if probe_fired {
-            let _ = auditor.log_event(AuditEvent::new(
+            log_audit_event(
+                &auditor,
                 agent_id,
                 tool_name,
                 "SEMANTIC_PROBE_ESCALATE",
                 format!(
                     "Semantic probe triggered on heuristic-clear candidate (score={score:.2}), escalating to pipeline"
                 ),
-            ));
+                session_id,
+            );
             return None;
         }
         let score_pct = format!("{:.0}%", score * 100.0);
-        let _ = auditor.log_event(AuditEvent::new(
+        log_audit_event(
+            &auditor,
             agent_id,
             tool_name,
             "HEURISTIC_CLEAR",
             format!("Cleared by heuristic fast-path ({score_pct})"),
-        ));
+            session_id,
+        );
         return Some((
             "ALLOW".to_string(),
             format!("Cleared by heuristic ({score_pct})"),
@@ -199,9 +221,14 @@ pub fn extract_tool_input_text(tool_input: &serde_json::Value) -> String {
     serde_json::to_string(tool_input).unwrap_or_default()
 }
 
-pub fn check_value(tool_input: &serde_json::Value) -> (Verdict, String, String, String) {
+pub fn check_value(
+    agent_id: &str,
+    tool_name: &str,
+    session_id: Option<&str>,
+    tool_input: &serde_json::Value,
+) -> (Verdict, String, String, String) {
     let extracted_text = extract_tool_input_text(tool_input);
-    let (outcome, reason) = security_interceptor("rust_daemon", "tool_input", &extracted_text);
+    let (outcome, reason) = security_interceptor(agent_id, tool_name, session_id, &extracted_text);
 
     let verdict = match outcome.as_str() {
         "DENY" => Verdict::Deny,
@@ -222,7 +249,12 @@ pub fn check_value(tool_input: &serde_json::Value) -> (Verdict, String, String, 
     (verdict, reason, db_outcome, extracted_text)
 }
 
-pub fn security_interceptor(agent_id: &str, tool_name: &str, tool_input: &str) -> (String, String) {
+pub fn security_interceptor(
+    agent_id: &str,
+    tool_name: &str,
+    session_id: Option<&str>,
+    tool_input: &str,
+) -> (String, String) {
     let _start = Instant::now();
     let auditor = auditor();
     let pool = db_pool();
@@ -232,12 +264,14 @@ pub fn security_interceptor(agent_id: &str, tool_name: &str, tool_input: &str) -
         Ok((true, pattern)) => {
             let matched = pattern.unwrap_or_else(|| "<unknown>".to_string());
             let _ = registry::suspend_agent(pool, agent_id);
-            let _ = auditor.log_event(AuditEvent::new(
+            log_audit_event(
+                &auditor,
                 agent_id,
                 tool_name,
                 "KILL_SWITCH",
                 format!("Stage 1 regex matched: {matched}"),
-            ));
+                session_id,
+            );
             return (
                 "DENY".to_string(),
                 format!("BLOCKED by Stage 1 regex: {matched}"),
@@ -245,7 +279,14 @@ pub fn security_interceptor(agent_id: &str, tool_name: &str, tool_input: &str) -
         }
         Ok((false, _)) => {}
         Err(err) => {
-            let _ = auditor.log_event(AuditEvent::new(agent_id, tool_name, "STAGE1_ERROR", &err));
+            log_audit_event(
+                &auditor,
+                agent_id,
+                tool_name,
+                "STAGE1_ERROR",
+                &err,
+                session_id,
+            );
             return (
                 "DENY".to_string(),
                 format!("Stage 1 regex engine error: {err}"),
@@ -253,17 +294,21 @@ pub fn security_interceptor(agent_id: &str, tool_name: &str, tool_input: &str) -
         }
     }
 
-    if let Some(result) = _heuristic_fastpath(agent_id, tool_name, tool_input, probe_fired) {
+    if let Some(result) =
+        _heuristic_fastpath(agent_id, tool_name, session_id, tool_input, probe_fired)
+    {
         return result;
     }
 
     if probe_fired {
-        let _ = auditor.log_event(AuditEvent::new(
+        log_audit_event(
+            &auditor,
             agent_id,
             tool_name,
             "SEMANTIC_PROBE_ESCALATE",
             "Semantic probe triggered; requires Python Stage 2/3 adjudication",
-        ));
+            session_id,
+        );
     }
 
     // PYTHON PIPELINE BOUNDARY: Rust stops here. The caller must forward to the
@@ -286,7 +331,7 @@ pub fn hardened_interceptor(
     tool_name: &str,
     tool_input: &str,
 ) -> (String, String, Option<String>) {
-    let interceptor_fn: InterceptorFn = Box::new(|a, t, i| security_interceptor(a, t, i));
+    let interceptor_fn: InterceptorFn = Box::new(|a, t, i| security_interceptor(a, t, None, i));
     hardening::apply_l1_5_hardening(agent_id, tool_name, tool_input, Some(interceptor_fn))
 }
 
@@ -299,4 +344,67 @@ fn compile_patterns(patterns: &[&str]) -> Vec<Regex> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_db_path() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "asf-rust-daemon-attribution-{}-{nanos}.db",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn check_value_logs_request_identity_instead_of_placeholders() {
+        let db_path = unique_test_db_path();
+        let db = registry::open_db(&db_path);
+        registry::store_detection_patterns(&db, &json!(["ASF_ATTRIBUTION_TEST_SENTINEL"]))
+            .expect("store test detection pattern");
+        drop(db);
+
+        std::env::set_var("ASF_HOOK_DB", &db_path);
+
+        let tool_input = json!({"command": "echo ASF_ATTRIBUTION_TEST_SENTINEL"});
+        let (verdict, reason, db_outcome, _extracted_text) = check_value(
+            "claude-code",
+            "Bash",
+            Some("claude-session-123"),
+            &tool_input,
+        );
+
+        assert!(matches!(verdict, Verdict::Deny));
+        assert!(reason.contains("Stage 1 regex"));
+        assert_eq!(db_outcome, "KILL_SWITCH");
+
+        let conn = Connection::open(&db_path).expect("open test db");
+        let (agent_id, action, outcome, session_id): (String, String, String, Option<String>) =
+            conn.query_row(
+                "SELECT agent_id, action, outcome, session_id \
+                 FROM audit_trail \
+                 WHERE outcome = 'KILL_SWITCH' \
+                 ORDER BY timestamp DESC \
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read audit event");
+
+        assert_eq!(agent_id, "claude-code");
+        assert_eq!(action, "Bash");
+        assert_eq!(outcome, "KILL_SWITCH");
+        assert_eq!(session_id.as_deref(), Some("claude-session-123"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }

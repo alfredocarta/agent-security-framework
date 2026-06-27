@@ -81,6 +81,7 @@ pub fn write_deny_record(
             human_reason TEXT,
             prev_hash TEXT,
             trace_id TEXT,
+            session_id TEXT,
             hostname TEXT,
             username TEXT
         );
@@ -111,6 +112,7 @@ pub fn write_deny_record(
     )?;
     let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN hostname TEXT", []);
     let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN username TEXT", []);
+    let _ = conn.execute("ALTER TABLE audit_trail ADD COLUMN session_id TEXT", []);
 
     let stable_args = stable_json_value(&req.tool_input);
     let args_hash = sha256_hex(&stable_args);
@@ -138,7 +140,7 @@ pub fn write_deny_record(
         )
         .unwrap_or_else(|_| "0".repeat(64));
 
-    let agent_id = namespaced_agent_id("claude-code-agent");
+    let agent_id = namespaced_agent_id(&req.agent_id);
     let action = &req.tool_name;
     let audit_data = format!("{}{}{}{}{}", agent_id, action, outcome, reason, prev_hash);
     let audit_hash = sha256_hex(audit_data.as_bytes());
@@ -155,9 +157,9 @@ pub fn write_deny_record(
     conn.execute(
         "
         INSERT INTO audit_trail
-            (hash, timestamp, agent_id, action, outcome, reason, human_reason, prev_hash, trace_id, hostname, username)
+            (hash, timestamp, agent_id, action, outcome, reason, human_reason, prev_hash, trace_id, session_id, hostname, username)
         VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)
+            (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)
         ",
         params![
             audit_hash,
@@ -168,6 +170,7 @@ pub fn write_deny_record(
             reason,
             prev_hash,
             trace_id,
+            req.session_id,
             hostname,
             username,
         ],
