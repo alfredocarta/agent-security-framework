@@ -312,6 +312,16 @@ pub fn security_interceptor(
     let auditor = auditor();
     let pool = db_pool();
 
+    log_audit_event(
+        &auditor,
+        agent_id,
+        tool_name,
+        "INTERCEPTOR_START",
+        "Interceptor invoked",
+        session_id,
+        trace_id,
+    );
+
     let probe_fired = _semantic_probe(tool_input);
     match _stage1_regex(tool_input) {
         Ok((true, pattern)) => {
@@ -523,16 +533,38 @@ mod tests {
             .expect("write claude trace");
 
         let conn = Connection::open(&db_path).expect("open test db");
-        let audit_trace_id: String = conn
+        let (audit_trace_id, terminal_count): (String, i64) = conn
             .query_row(
-                "SELECT trace_id FROM audit_trail \
-                 WHERE outcome = 'HEURISTIC_CLEAR' \
-                 ORDER BY timestamp DESC \
-                 LIMIT 1",
+                "SELECT trace_id, COUNT(*) FROM audit_trail \
+                 WHERE outcome = 'HEURISTIC_CLEAR'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("read heuristic clear audit trace_id");
+        let (
+            start_trace_id,
+            start_reason,
+            start_agent_id,
+            start_action,
+            start_session_id,
+            start_count,
+        ): (String, String, String, String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT trace_id, reason, agent_id, action, session_id, COUNT(*) FROM audit_trail \
+                 WHERE outcome = 'INTERCEPTOR_START'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read interceptor start audit event");
         let claude_trace_id: String = conn
             .query_row(
                 "SELECT trace_id FROM claude_tool_traces \
@@ -543,7 +575,17 @@ mod tests {
             )
             .expect("read claude tool trace_id");
 
+        assert_eq!(terminal_count, 1);
+        assert_eq!(start_count, 1);
+        assert_eq!(start_reason, "Interceptor invoked");
+        assert_eq!(start_agent_id, "claude-code");
+        assert_eq!(start_action, "Bash");
+        assert_eq!(
+            start_session_id.as_deref(),
+            Some("claude-session-fast-allow")
+        );
         assert!(!audit_trace_id.is_empty());
+        assert_eq!(audit_trace_id, start_trace_id);
         assert_eq!(audit_trace_id, claude_trace_id);
 
         drop(conn);
