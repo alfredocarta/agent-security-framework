@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from audit import AUDITOR as _HARDENING_AUDITOR
+import canonical_log
 
 # Pre-compiled regex patterns (module load, not per-call)
 _RE_BASE64_CANDIDATE = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
@@ -264,9 +265,12 @@ def _extract_hidden_html_text(text: str) -> tuple[list[str], bool]:
         inner = text[tag_end + 1:close_pos].strip()
         if inner:
             hidden_texts.append(inner)
-    return hidden_texts, len(hidden_texts) > 0
+    found = len(hidden_texts) > 0
+    canonical_log.log("extract_hidden_html_text", "py", text, {"hidden_texts": hidden_texts, "found": found})
+    return hidden_texts, found
 
 def _strip_hidden_html_text(text: str) -> str:
+    original_text = text
     spans = []
     for match in _RE_HIDDEN_STYLE.finditer(text):
         tag_start = text.rfind('<', 0, match.start())
@@ -285,6 +289,7 @@ def _strip_hidden_html_text(text: str) -> str:
         spans.append((tag_start, close_pos + len(close_tag)))
     for start, end in reversed(spans):
         text = text[:start] + text[end:]
+    canonical_log.log("strip_hidden_html_text", "py", original_text, {"text": text})
     return text
 
 _BASE64_ATTACK_WORDS = frozenset({
@@ -431,24 +436,30 @@ def classify_text(text, threshold=_DEFAULT_THRESHOLD):
         reason = f"Injection risk {score:.2f} [{', '.join(top)}]"
     else:
         reason = ""
-    return ClassifierResult(score=score, features={**features, "doc_context": doc_confidence}, blocked=blocked, reason=reason)
+    _result = ClassifierResult(score=score, features={**features, "doc_context": doc_confidence}, blocked=blocked, reason=reason)
+    canonical_log.log("classify_text", "py", text, {"score": _result.score, "blocked": _result.blocked, "signals": _result.features})
+    return _result
 
 def _classifier_gate_score(tool_input):
     result = classify_text(tool_input)
-    if result.blocked:
-        return 1.0
-    return result.score
+    score = 1.0 if result.blocked else result.score
+    canonical_log.log("classifier_gate_score", "py", tool_input, {"score": score, "blocked": result.blocked, "signals": result.features})
+    return score
 
 def _detect_hidden_html(text: str) -> float:
     hidden_texts, found = _extract_hidden_html_text(text)
     if not found:
+        canonical_log.log("detect_hidden_html", "py", text, {"score": 0.0})
         return 0.0
     combined = ' '.join(hidden_texts)
     score = _classifier_gate_score(combined)
-    return score if score > 0 else 0.3
+    score = score if score > 0 else 0.3
+    canonical_log.log("detect_hidden_html", "py", text, {"score": score})
+    return score
 
 def classifier_gate(tool_input):
     result = classify_text(tool_input)
+    canonical_log.log("classifier_gate", "py", tool_input, {"score": result.score, "blocked": result.blocked, "signals": result.features})
     return result.blocked, result.score
 
 def _extract_text_fields(tool_input: str) -> list[str]:
@@ -463,14 +474,18 @@ def _extract_text_fields(tool_input: str) -> list[str]:
             fields.append(parsed)
     except (_json.JSONDecodeError, TypeError):
         fields.append(tool_input)
+    canonical_log.log("extract_text_fields", "py", tool_input, {"fields": fields})
     return fields
 
 def _cross_field_classify(tool_input: str) -> float:
     fields = _extract_text_fields(tool_input)
     if len(fields) <= 1:
+        canonical_log.log("cross_field_classify", "py", tool_input, {"score": 0.0})
         return 0.0
     aggregate = " ".join(fields)
-    return _classifier_gate_score(aggregate)
+    score = _classifier_gate_score(aggregate)
+    canonical_log.log("cross_field_classify", "py", tool_input, {"score": score})
+    return score
 
 def _is_readable(text: str) -> bool:
     if not text:
@@ -504,6 +519,7 @@ def _decode_recursive(text: str, max_depth: int = 5) -> tuple[str, int]:
             break
         current = decoded
         decoded_depth = depth
+    canonical_log.log("decode_recursive", "py", text, {"decoded": current, "depth": decoded_depth})
     return current, decoded_depth
 
 def _decode_embedded_hex(text: str) -> tuple[str, bool]:
@@ -531,8 +547,10 @@ def decode_and_rescan(tool_input, stage1_regex_fn=None):
         score = _classifier_gate_score(embedded_decoded)
         if score >= 0.2:
             print(f"[L1.5] Embedded hex encoding bypass detected (score={score:.2f})", file=__import__("sys").stderr)
+            canonical_log.log("decode_and_rescan", "py", tool_input, {"decoded": embedded_decoded, "score": score})
             return embedded_decoded, score
         print("[L1.5] Embedded hex encoding request detected", file=__import__("sys").stderr)
+        canonical_log.log("decode_and_rescan", "py", tool_input, {"decoded": embedded_decoded, "score": 0.3})
         return embedded_decoded, 0.3
 
     _MAX_DECODE_BYTES = 512 * 1024  # 512 KB cap on decoded output per layer
@@ -546,11 +564,14 @@ def decode_and_rescan(tool_input, stage1_regex_fn=None):
         score = _classifier_gate_score(decoded)
         if score >= 0.2:
             print(f"[L1.5] Encoding bypass detected at depth {depth} (score={score:.2f})", file=__import__("sys").stderr)
+            canonical_log.log("decode_and_rescan", "py", tool_input, {"decoded": decoded, "score": score, "depth": depth})
             return decoded, score
         if stage1_regex_fn and stage1_regex_fn(decoded):
             print(f"[L1.5] Encoding bypass detected at depth {depth} (stage1)", file=__import__("sys").stderr)
+            canonical_log.log("decode_and_rescan", "py", tool_input, {"decoded": decoded, "score": 1.0, "depth": depth})
             return decoded, 1.0
         current = decoded
+    canonical_log.log("decode_and_rescan", "py", tool_input, {"decoded": current, "score": 0.0})
     return current, 0.0
 
 def datamark(text, delimiter=_DELIMITER):
@@ -573,7 +594,7 @@ def spotlight_message(message, delimiter=_DELIMITER):
     return _SPOTLIGHT_INSTRUCTION, datamark(message, delimiter)
 
 def canary_trap(tool_input):
-    canary = f"CT-{uuid.uuid4().hex[:12]}"
+    canary = os.environ.get("ASF_EQUIV_CANARY") or f"CT-{uuid.uuid4().hex[:12]}"
     if len(tool_input) < _MIN_CANARY_LENGTH:
         return tool_input, canary
     tag = _CANARY_TEMPLATE.format(canary=canary)

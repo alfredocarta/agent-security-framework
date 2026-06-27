@@ -1,9 +1,11 @@
 use crate::audit::{AuditEvent, AuditTrail};
+use crate::canonical_log;
 use crate::db;
 use crate::hardening::{self, InterceptorFn};
 use crate::protocol::Verdict;
 use crate::registry::{self, DbPool};
 use regex::Regex;
+use serde_json::json;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -65,15 +67,18 @@ fn semantic_probe_patterns() -> &'static Vec<Regex> {
 }
 
 pub fn _semantic_probe(text: &str) -> bool {
-    if std::env::var("ASF_DISABLE_SEMANTIC_PROBE")
+    let fired = if std::env::var("ASF_DISABLE_SEMANTIC_PROBE")
         .map(|v| v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
     {
-        return false;
-    }
-    semantic_probe_patterns()
-        .iter()
-        .any(|pattern| pattern.is_match(text))
+        false
+    } else {
+        semantic_probe_patterns()
+            .iter()
+            .any(|pattern| pattern.is_match(text))
+    };
+    canonical_log::log("semantic_probe", "rust", text, json!({"fired": fired}));
+    fired
 }
 
 // ── Stage 1: DB-backed regex engine ──
@@ -99,9 +104,21 @@ pub fn _stage1_regex(tool_input: &str) -> Result<(bool, Option<String>), String>
         let re = Regex::new(pattern_text)
             .map_err(|e| format!("invalid detection regex {pattern_text:?}: {e}"))?;
         if re.is_match(tool_input) {
+            canonical_log::log(
+                "stage1_regex",
+                "rust",
+                tool_input,
+                json!({"matched": true, "pattern": pattern_text}),
+            );
             return Ok((true, Some(pattern_text.to_string())));
         }
     }
+    canonical_log::log(
+        "stage1_regex",
+        "rust",
+        tool_input,
+        json!({"matched": false, "pattern": null}),
+    );
     Ok((false, None))
 }
 
@@ -140,10 +157,17 @@ pub fn _heuristic_fastpath(
             "HEURISTIC_BLOCK",
             format!("Blocked by heuristic fast-path (score={score_pct})"),
         ));
-        return Some((
+        let result = (
             "DENY".to_string(),
             format!("BLOCKED by heuristic (score={score_pct})"),
-        ));
+        );
+        canonical_log::log(
+            "heuristic_fastpath",
+            "rust",
+            tool_input,
+            json!({"verdict": result.0, "reason": result.1}),
+        );
+        return Some(result);
     }
 
     let always_stage25 = std::env::var("ASF_ALWAYS_STAGE25")
@@ -160,6 +184,12 @@ pub fn _heuristic_fastpath(
                     "Semantic probe triggered on heuristic-clear candidate (score={score:.2}), escalating to pipeline"
                 ),
             ));
+            canonical_log::log(
+                "heuristic_fastpath",
+                "rust",
+                tool_input,
+                json!({"verdict": null, "reason": null}),
+            );
             return None;
         }
         let score_pct = format!("{:.0}%", score * 100.0);
@@ -169,12 +199,121 @@ pub fn _heuristic_fastpath(
             "HEURISTIC_CLEAR",
             format!("Cleared by heuristic fast-path ({score_pct})"),
         ));
-        return Some((
+        let result = (
             "ALLOW".to_string(),
             format!("Cleared by heuristic ({score_pct})"),
-        ));
+        );
+        canonical_log::log(
+            "heuristic_fastpath",
+            "rust",
+            tool_input,
+            json!({"verdict": result.0, "reason": result.1}),
+        );
+        return Some(result);
     }
 
+    canonical_log::log(
+        "heuristic_fastpath",
+        "rust",
+        tool_input,
+        json!({"verdict": null, "reason": null}),
+    );
+    None
+}
+
+fn _heuristic_fastpath_with_score(
+    agent_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    probe_fired: bool,
+    score: f64,
+) -> Option<(String, String)> {
+    if std::env::var("ASF_DISABLE_FASTPATH")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let clear_threshold = std::env::var("ASF_CLEAR_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(HEURISTIC_CLEAR_THRESHOLD);
+    let block_threshold = std::env::var("ASF_HEURISTIC_BLOCK")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(HEURISTIC_BLOCK_THRESHOLD);
+    let auditor = auditor();
+
+    if score >= block_threshold {
+        let score_pct = format!("{:.0}%", score * 100.0);
+        let _ = auditor.log_event(AuditEvent::new(
+            agent_id,
+            tool_name,
+            "HEURISTIC_BLOCK",
+            format!("Blocked by heuristic fast-path (score={score_pct})"),
+        ));
+        let result = (
+            "DENY".to_string(),
+            format!("BLOCKED by heuristic (score={score_pct})"),
+        );
+        canonical_log::log(
+            "heuristic_fastpath",
+            "rust",
+            tool_input,
+            json!({"verdict": result.0, "reason": result.1}),
+        );
+        return Some(result);
+    }
+
+    let always_stage25 = std::env::var("ASF_ALWAYS_STAGE25")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if score <= clear_threshold && !always_stage25 {
+        if probe_fired {
+            let _ = auditor.log_event(AuditEvent::new(
+                agent_id,
+                tool_name,
+                "SEMANTIC_PROBE_ESCALATE",
+                format!(
+                    "Semantic probe triggered on heuristic-clear candidate (score={score:.2}), escalating to pipeline"
+                ),
+            ));
+            canonical_log::log(
+                "heuristic_fastpath",
+                "rust",
+                tool_input,
+                json!({"verdict": null, "reason": null}),
+            );
+            return None;
+        }
+        let score_pct = format!("{:.0}%", score * 100.0);
+        let _ = auditor.log_event(AuditEvent::new(
+            agent_id,
+            tool_name,
+            "HEURISTIC_CLEAR",
+            format!("Cleared by heuristic fast-path ({score_pct})"),
+        ));
+        let result = (
+            "ALLOW".to_string(),
+            format!("Cleared by heuristic ({score_pct})"),
+        );
+        canonical_log::log(
+            "heuristic_fastpath",
+            "rust",
+            tool_input,
+            json!({"verdict": result.0, "reason": result.1}),
+        );
+        return Some(result);
+    }
+
+    canonical_log::log(
+        "heuristic_fastpath",
+        "rust",
+        tool_input,
+        json!({"verdict": null, "reason": null}),
+    );
     None
 }
 
@@ -223,11 +362,34 @@ pub fn check_value(tool_input: &serde_json::Value) -> (Verdict, String, String, 
 }
 
 pub fn security_interceptor(agent_id: &str, tool_name: &str, tool_input: &str) -> (String, String) {
+    security_interceptor_inner(agent_id, tool_name, tool_input, None)
+}
+
+fn security_interceptor_inner(
+    agent_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    l15_context: Option<(bool, f64)>,
+) -> (String, String) {
     let _start = Instant::now();
     let auditor = auditor();
     let pool = db_pool();
 
-    let probe_fired = _semantic_probe(tool_input);
+    let probe_fired = match l15_context {
+        Some((probe, _score)) => probe,
+        None => _semantic_probe(tool_input),
+    };
+    let fastpath_result = _heuristic_fastpath(agent_id, tool_name, tool_input, probe_fired);
+    if let Some(result) = fastpath_result {
+        canonical_log::log(
+            "security_interceptor",
+            "rust",
+            tool_input,
+            json!({"verdict": result.0, "reason": result.1}),
+        );
+        return result;
+    }
+
     match _stage1_regex(tool_input) {
         Ok((true, pattern)) => {
             let matched = pattern.unwrap_or_else(|| "<unknown>".to_string());
@@ -238,23 +400,33 @@ pub fn security_interceptor(agent_id: &str, tool_name: &str, tool_input: &str) -
                 "KILL_SWITCH",
                 format!("Stage 1 regex matched: {matched}"),
             ));
-            return (
+            let result = (
                 "DENY".to_string(),
                 format!("BLOCKED by Stage 1 regex: {matched}"),
             );
+            canonical_log::log(
+                "security_interceptor",
+                "rust",
+                tool_input,
+                json!({"verdict": result.0, "reason": result.1}),
+            );
+            return result;
         }
         Ok((false, _)) => {}
         Err(err) => {
             let _ = auditor.log_event(AuditEvent::new(agent_id, tool_name, "STAGE1_ERROR", &err));
-            return (
+            let result = (
                 "DENY".to_string(),
                 format!("Stage 1 regex engine error: {err}"),
             );
+            canonical_log::log(
+                "security_interceptor",
+                "rust",
+                tool_input,
+                json!({"verdict": result.0, "reason": result.1}),
+            );
+            return result;
         }
-    }
-
-    if let Some(result) = _heuristic_fastpath(agent_id, tool_name, tool_input, probe_fired) {
-        return result;
     }
 
     if probe_fired {
@@ -273,10 +445,17 @@ pub fn security_interceptor(agent_id: &str, tool_name: &str, tool_input: &str) -
     //     "trace_id":..., "source":"rust_interceptor" }
     // Expected response:
     //   { "verdict":"ALLOW|DENY", "reason":"...", "audit_hash":"..." }
-    (
+    let result = (
         "UNCERTAIN".to_string(),
         "stage1_no_match_forward_to_python_stage23".to_string(),
-    )
+    );
+    canonical_log::log(
+        "security_interceptor",
+        "rust",
+        tool_input,
+        json!({"verdict": result.0, "reason": result.1}),
+    );
+    result
 }
 
 // ── hardened_interceptor: L1.5 → Stage 1 → Python Stage 2/3 ──
@@ -286,8 +465,20 @@ pub fn hardened_interceptor(
     tool_name: &str,
     tool_input: &str,
 ) -> (String, String, Option<String>) {
-    let interceptor_fn: InterceptorFn = Box::new(|a, t, i| security_interceptor(a, t, i));
-    hardening::apply_l1_5_hardening(agent_id, tool_name, tool_input, Some(interceptor_fn))
+    let probe_fired = _semantic_probe(tool_input);
+    let l15_score = hardening::classifier_gate_score(tool_input);
+    let interceptor_fn: InterceptorFn = Box::new(move |a, t, i| {
+        security_interceptor_inner(a, t, i, Some((probe_fired, l15_score)))
+    });
+    let result =
+        hardening::apply_l1_5_hardening(agent_id, tool_name, tool_input, Some(interceptor_fn));
+    canonical_log::log(
+        "hardened_interceptor",
+        "rust",
+        tool_input,
+        json!({"verdict": result.0, "reason": result.1}),
+    );
+    result
 }
 
 fn compile_patterns(patterns: &[&str]) -> Vec<Regex> {
