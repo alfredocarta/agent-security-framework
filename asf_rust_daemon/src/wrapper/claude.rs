@@ -87,22 +87,60 @@ fn ensure_hooks(root: &mut Value, hook_bin: &str, hook_py: &str) -> bool {
 fn ensure_entry(array: &mut Value, matcher: &str, required: &[Value]) -> bool {
     let arr = array.as_array_mut().unwrap();
     if let Some(entry) = arr.iter_mut().find(|e| e["matcher"] == matcher) {
-        let existing = entry["hooks"].as_array().cloned().unwrap_or_default();
-        let missing: Vec<Value> = required
-            .iter()
-            .filter(|r| !existing.iter().any(|e| e["command"] == r["command"]))
-            .cloned()
-            .collect();
-        if missing.is_empty() {
-            return false;
-        }
         let hooks_arr = entry["hooks"].as_array_mut().unwrap();
-        hooks_arr.extend(missing);
-        true
+        let mut changed = false;
+
+        for required_hook in required {
+            if is_asf_hook_command(required_hook) {
+                changed |= ensure_single_asf_hook_entry(hooks_arr, required_hook);
+            } else if !hooks_arr
+                .iter()
+                .any(|existing| existing["command"] == required_hook["command"])
+            {
+                hooks_arr.push(required_hook.clone());
+                changed = true;
+            }
+        }
+
+        changed
     } else {
         arr.push(json!({"matcher": matcher, "hooks": required}));
         true
     }
+}
+
+fn ensure_single_asf_hook_entry(hooks_arr: &mut Vec<Value>, required_hook: &Value) -> bool {
+    let Some(first_idx) = hooks_arr.iter().position(is_asf_hook_command) else {
+        hooks_arr.push(required_hook.clone());
+        return true;
+    };
+
+    let mut changed = false;
+    if hooks_arr[first_idx] != *required_hook {
+        hooks_arr[first_idx] = required_hook.clone();
+        changed = true;
+    }
+
+    let original_len = hooks_arr.len();
+    let mut seen_asf_hook = false;
+    hooks_arr.retain(|hook| {
+        if is_asf_hook_command(hook) {
+            if seen_asf_hook {
+                return false;
+            }
+            seen_asf_hook = true;
+        }
+        true
+    });
+
+    changed || hooks_arr.len() != original_len
+}
+
+fn is_asf_hook_command(hook: &Value) -> bool {
+    hook["command"]
+        .as_str()
+        .and_then(|command| command.split_whitespace().last())
+        .is_some_and(|last_arg| last_arg.ends_with("asf_hook.py"))
 }
 
 fn settings_json_path() -> PathBuf {
@@ -133,4 +171,98 @@ fn resolve_python() -> Result<String, String> {
         }
     }
     Err("nessun interprete Python trovato (CONDA_PREFIX, python3, python)".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STALE_HOOK_PY: &str = "/usr/bin/python3 /repo/asf_hook.py";
+    const CURRENT_HOOK_PY: &str = "/repo/asf-venv/bin/python3 /repo/asf_hook.py";
+    const HOOK_BIN: &str = "/repo/asf_rust_daemon/target/release/asf-rust-hook";
+
+    #[test]
+    fn ensure_hooks_rewrites_stale_asf_hook_without_duplicates() {
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": HOOK_BIN},
+                        {"type": "command", "command": STALE_HOOK_PY},
+                        {"type": "command", "command": "/custom/python /custom/other_hook.py"},
+                        {"type": "command", "command": "/another/python /repo/asf_hook.py"}
+                    ]
+                }],
+                "PostToolUse": [{
+                    "matcher": MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": STALE_HOOK_PY},
+                        {"type": "command", "command": "/custom/python /custom/other_hook.py"}
+                    ]
+                }]
+            }
+        });
+
+        assert!(ensure_hooks(&mut root, HOOK_BIN, CURRENT_HOOK_PY));
+
+        assert_asf_hook_commands(&root, "PreToolUse", &[CURRENT_HOOK_PY]);
+        assert_asf_hook_commands(&root, "PostToolUse", &[CURRENT_HOOK_PY]);
+        assert!(matcher_hooks(&root, "PreToolUse")
+            .iter()
+            .any(|hook| hook["command"] == HOOK_BIN));
+        assert!(matcher_hooks(&root, "PreToolUse")
+            .iter()
+            .any(|hook| hook["command"] == "/custom/python /custom/other_hook.py"));
+        assert!(matcher_hooks(&root, "PostToolUse")
+            .iter()
+            .any(|hook| hook["command"] == "/custom/python /custom/other_hook.py"));
+    }
+
+    #[test]
+    fn ensure_hooks_is_noop_with_current_asf_hook() {
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": HOOK_BIN},
+                        {"type": "command", "command": CURRENT_HOOK_PY},
+                        {"type": "command", "command": "/custom/python /custom/other_hook.py"}
+                    ]
+                }],
+                "PostToolUse": [{
+                    "matcher": MATCHER,
+                    "hooks": [
+                        {"type": "command", "command": CURRENT_HOOK_PY}
+                    ]
+                }]
+            }
+        });
+        let before = root.clone();
+
+        assert!(!ensure_hooks(&mut root, HOOK_BIN, CURRENT_HOOK_PY));
+        assert_eq!(root, before);
+    }
+
+    fn matcher_hooks<'a>(root: &'a Value, section: &str) -> &'a Vec<Value> {
+        root["hooks"][section]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["matcher"] == MATCHER)
+            .unwrap()["hooks"]
+            .as_array()
+            .unwrap()
+    }
+
+    fn assert_asf_hook_commands(root: &Value, section: &str, expected: &[&str]) {
+        let commands: Vec<&str> = matcher_hooks(root, section)
+            .iter()
+            .filter(|hook| is_asf_hook_command(hook))
+            .map(|hook| hook["command"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(commands, expected);
+    }
 }
