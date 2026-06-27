@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from secret_redaction import redact_text, redact_value
 from trace_output_preview import output_preview_text as _shared_output_preview_text
 from trace_output_preview import truncate_preview_text
 from wrapper import asf_core
@@ -87,7 +88,7 @@ def sha256_text(value: Any) -> str:
 
 
 def preview_value(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str:
-    return truncate_preview_text(stable_json(value), max_bytes)
+    return truncate_preview_text(stable_json(redact_value(value)), max_bytes)
 
 
 def output_preview_text(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str:
@@ -171,11 +172,11 @@ class HermesTraceStore:
                     tool_call_id,
                     hermes_tool_name,
                     asf_tool_name,
-                    sha256_text(args),
+                    sha256_text(redact_value(args)),
                     preview_value(args),
                     verdict,
                     outcome,
-                    reason,
+                    redact_text(reason) if reason is not None else None,
                     stage,
                     confidence,
                     asf_latency_ms,
@@ -214,7 +215,8 @@ class HermesTraceStore:
             "output_preview = ?",
             "tool_duration_ms = COALESCE(?, tool_duration_ms)",
         ]
-        values: list[Any] = [sha256_text(result), output_preview_text(result), tool_duration_ms]
+        redacted_result = redact_value(result)
+        values: list[Any] = [sha256_text(redacted_result), output_preview_text(redacted_result), tool_duration_ms]
         if side_effect_verified is not None:
             assignments.append("side_effect_verified = ?")
             values.append(1 if side_effect_verified else 0)
@@ -226,7 +228,7 @@ class HermesTraceStore:
             values.append(output_verdict)
         if output_reason is not None:
             assignments.append("reason = COALESCE(reason, '') || ?")
-            values.append(f" | output_guard: {output_reason}")
+            values.append(f" | output_guard: {redact_text(output_reason)}")
         values.extend(params)
         # Idempotency guard: only write output into rows that have not been finished yet.
         # The live runtime captures output via the dispatch wrapper; if post_tool_call also

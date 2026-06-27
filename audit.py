@@ -1,6 +1,7 @@
 import os
 import hashlib
 import threading
+from secret_redaction import redact_text, redact_value
 from registry import SessionLocal, AuditModel
 
 _audit_lock = threading.Lock()
@@ -68,6 +69,10 @@ class AuditTrail:
     def log_event(self, agent_id, action, outcome, reason,
                   *, trace_id=None, latency_ms=None, confidence=None,
                   metadata=None, session_id=None, human_reason=None):
+        action = redact_text(str(action))
+        reason = redact_text(str(reason))
+        human_reason = redact_text(str(human_reason)) if human_reason is not None else None
+        metadata = redact_value(metadata) if metadata else metadata
         with _audit_lock:
             db = SessionLocal()
             try:

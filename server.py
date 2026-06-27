@@ -1,9 +1,11 @@
 import secrets
 import os
+from html import escape
 from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
 from registry import SessionLocal, AuditModel
+from secret_redaction import redact_text
 import uvicorn
 
 app = FastAPI(title='Agent Security Dashboard')
@@ -50,13 +52,18 @@ def get_dashboard(
             color = 'orange'
         else:
             color = 'green'
+        timestamp = escape(str(log.timestamp))
+        agent_id = escape(redact_text(str(log.agent_id)))
+        outcome = escape(redact_text(str(log.outcome)))
+        reason = escape(redact_text(str(log.reason)))
+        hash_prefix = escape(str(log.hash[:16]))
         rows += (
             '<tr style="border-bottom: 1px solid #ddd;">'
-            f'<td style="padding:10px;">{log.timestamp}</td>'
-            f'<td style="padding:10px;"><b>{log.agent_id}</b></td>'
-            f'<td style="padding:10px; color:{color}; font-weight:bold;">{log.outcome}</td>'
-            f'<td style="padding:10px;">{log.reason}</td>'
-            f'<td style="padding:10px; font-family:monospace; font-size:10px;">{log.hash[:16]}...</td>'
+            f'<td style="padding:10px;">{timestamp}</td>'
+            f'<td style="padding:10px;"><b>{agent_id}</b></td>'
+            f'<td style="padding:10px; color:{color}; font-weight:bold;">{outcome}</td>'
+            f'<td style="padding:10px;">{reason}</td>'
+            f'<td style="padding:10px; font-family:monospace; font-size:10px;">{hash_prefix}...</td>'
             '</tr>'
         )
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from typing import Any
+import canonical_log
+from secret_redaction import redact_text
 
 
 def _json_default(value: Any) -> str:
@@ -110,4 +112,8 @@ def output_preview_text(value: Any, max_bytes: int) -> str:
             if is_non_zero:
                 text = f"{text}\nexit_code: {exit_code}"
 
-    return truncate_preview_text(text, max_bytes)
+    preview = truncate_preview_text(redact_text(text), max_bytes)
+    # Log the preview input as structured JSON so input_id is based on the same
+    # sorted-key/compact canonical serialization as Rust, not Python dict repr.
+    canonical_log.log("trace_output_preview", "py", unwrapped, {"preview": preview})
+    return preview

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import threading
 import uuid
@@ -11,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from secret_redaction import SECRET_PATTERNS, redact_text, redact_value
 from trace_output_preview import output_preview_text as _shared_output_preview_text
 from wrapper import asf_core
 
@@ -18,12 +18,6 @@ from wrapper import asf_core
 DEFAULT_MAX_PREVIEW_BYTES = int(os.environ.get("ASF_HOOK_MAX_PREVIEW_BYTES", "8192"))
 AGENT_ID = asf_core.namespace_agent_id("claude-code-agent")
 DEFAULT_AGENT_MODEL = os.environ.get("ASF_CLAUDE_AGENT_MODEL", "claude-sonnet-4-6 via Claude Code")
-
-SECRET_PATTERNS = (
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\s*[=:]\s*[^\s'\"]{8,}"),
-    re.compile(r"(?i)\b(bearer|sk-[a-z0-9_-]{12,}|ghp_[a-z0-9_]{20,})"),
-)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS claude_tool_traces (
@@ -77,28 +71,6 @@ def stable_json(value: Any) -> str:
 
 def sha256_text(value: Any) -> str:
     return hashlib.sha256(stable_json(value).encode("utf-8", errors="replace")).hexdigest()
-
-
-def _redact_text(text: str) -> str:
-    redacted = text
-    for pattern in SECRET_PATTERNS:
-        redacted = pattern.sub("[REDACTED_SECRET]", redacted)
-    canary = os.environ.get("ASF_HOOK_CANARY") or os.environ.get("ASF_HERMES_CANARY")
-    if canary:
-        redacted = redacted.replace(canary, "[REDACTED_CANARY]")
-    return redacted
-
-
-def redact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return _redact_text(value)
-    if isinstance(value, dict):
-        return {k: redact_value(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [redact_value(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(redact_value(v) for v in value)
-    return value
 
 
 def preview_value(value: Any, max_bytes: int = DEFAULT_MAX_PREVIEW_BYTES) -> str:
